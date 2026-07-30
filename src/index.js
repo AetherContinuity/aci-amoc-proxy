@@ -72,16 +72,30 @@ async function handleSLA(url) {
   }
 }
 
-// ── /sst-anomaly — Meriveden lampotila-anomalia, NOAA ERDDAP (OISST) ──
-// Dataset: CRW_sst_anom_v1_0 (Coral Reef Watch -tuote, mutta globaali
-// kattavuus soveltuu myos Pohjois-Atlantin subpolaariseen alueeseen).
-// Referenssi-ilmasto 1991-2020. Vahvistettu avoimeksi 2026-07-30.
+// ── /sst-anomaly — Meriveden lampotila-anomalia, NOAA ERDDAP ──
+// KORJATTU 2026-07-30: alkuperainen dataset (CRW_sst_anom_v1_0,
+// oceanwatch.pifsc.noaa.gov) esti robotit oman web_fetch-tyokaluni
+// puolelta, ja Workerin oma haku antoi 404 (todennakoisesti vaarasta
+// muuttujanimesta - arvasin CF-standard_name:n "sea_surface_
+// temperature_anomaly" sen sijaan etta olisin kayttanyt oikeaa,
+// lyhytta ERDDAP-muuttujanimea).
+//
+// VAIHDETTU: sama palvelin kuin /sla (coastwatch.noaa.gov, jo
+// vahvistettu toimivaksi), dataset noaacrwsstanomalyDaily ("Sea
+// Surface Temperature Anomaly, NOAA Coral Reef Watch Daily Global
+// 5km Satellite SST Anomaly, 1985-present, Daily").
+//
+// MUUTTUJANIMI ON ARVIO, EI VIELA VARMISTETTU: kaytetaan "sstAnom"
+// analogisen datasetin (jplMURSST41anom1day) perusteella - useat
+// ERDDAP-anomaliadatasetit kayttavat tata lyhytta camelCase-muotoa.
+// Jos tama epaonnistuu, seuraava askel on hakea taman TARKAN
+// datasetin oma .das-tiedosto muuttujan nimen varmistamiseksi.
 async function handleSSTAnomaly(url) {
   const lat = url.searchParams.get('lat') || '60.0';   // oletus: subpolaarinen Pohjois-Atlantti ("kylma laiska")
   const lon = url.searchParams.get('lon') || '-30.0';
   const date = url.searchParams.get('date') || new Date().toISOString().slice(0, 10);
 
-  const erddapUrl = `https://oceanwatch.pifsc.noaa.gov/erddap/griddap/CRW_sst_anom_v1_0.csv?sea_surface_temperature_anomaly[(${date}T00:00:00Z)][(${lat})][(${lon})]`;
+  const erddapUrl = `https://coastwatch.noaa.gov/erddap/griddap/noaacrwsstanomalyDaily.csv?sstAnom[(${date}T00:00:00Z)][(${lat})][(${lon})]`;
 
   try {
     const r = await fetch(erddapUrl);
@@ -91,13 +105,13 @@ async function handleSSTAnomaly(url) {
     const csvText = await r.text();
     return json({
       bem_e_tyylinen_komponentti: 'AMOC — Pohjois-Atlantin SST-anomalia ("kylma laiska")',
-      lahde: 'NOAA ERDDAP (oceanwatch.pifsc.noaa.gov), dataset CRW_sst_anom_v1_0 (OISST-pohjainen)',
+      lahde: 'NOAA ERDDAP (coastwatch.noaa.gov), dataset noaacrwsstanomalyDaily (Coral Reef Watch, globaali)',
       kysely: { lat, lon, date },
       raaka_csv: csvText,
       huom: 'Negatiivinen anomalia subpolaarisella alueella (~50-65N, Gronlannin-Islannin-Norjan edustalla) on yksi AMOC-heikkenemisen tunnetuista "sormenjaljista" (cold blob).',
     });
   } catch (e) {
-    return json({ error: e.message, step: 'sst-anomaly', erddap_url: erddapUrl }, 502);
+    return json({ error: e.message, step: 'sst-anomaly', erddap_url: erddapUrl, huom: 'Muuttujanimi "sstAnom" on arvio - jos 400/404, tarkista datasetin oma .das-tiedosto' }, 502);
   }
 }
 
