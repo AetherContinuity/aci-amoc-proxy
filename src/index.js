@@ -95,7 +95,14 @@ async function handleSSTAnomaly(url) {
   const lon = url.searchParams.get('lon') || '-30.0';
   const date = url.searchParams.get('date') || new Date().toISOString().slice(0, 10);
 
-  const erddapUrl = `https://coastwatch.noaa.gov/erddap/griddap/noaacrwsstanomalyDaily.csv?sstAnom[(${date}T00:00:00Z)][(${lat})][(${lon})]`;
+  // KORJATTU 2026-07-30 (toinen yritys): "sstAnom" ei loytynyt -
+  // ERDDAP:n oma virhe vahvisti etta dataset ITSE on oikea, vain
+  // muuttujan nimi vaarin. Kokeillaan CRW-tuotteiden yleista
+  // nimeamiskaytantoa (isot kirjaimet + alaviiva, esim. CRW_DHW
+  // "degree heating week" -datasetissa) - EDELLEEN ARVIO.
+  const datasetId = 'noaacrwsstanomalyDaily';
+  const varName = 'CRW_SSTANOMALY';
+  const erddapUrl = `https://coastwatch.noaa.gov/erddap/griddap/${datasetId}.csv?${varName}[(${date}T00:00:00Z)][(${lat})][(${lon})]`;
 
   try {
     const r = await fetch(erddapUrl);
@@ -111,7 +118,25 @@ async function handleSSTAnomaly(url) {
       huom: 'Negatiivinen anomalia subpolaarisella alueella (~50-65N, Gronlannin-Islannin-Norjan edustalla) on yksi AMOC-heikkenemisen tunnetuista "sormenjaljista" (cold blob).',
     });
   } catch (e) {
-    return json({ error: e.message, step: 'sst-anomaly', erddap_url: erddapUrl, huom: 'Muuttujanimi "sstAnom" on arvio - jos 400/404, tarkista datasetin oma .das-tiedosto' }, 502);
+    // ALYKAS VARAJARJESTELY 2026-07-30: jos muuttujan nimi on vaarin,
+    // haetaan datasetin oma .das-tiedosto (sisaltaa KAIKKI oikeat
+    // muuttujanimet) ja liitetaan vastaukseen - lopettaa arvailun,
+    // seuraava korjaus voi kayttaa tasta suoraan oikeaa nimea.
+    let dasContent = null;
+    try {
+      const dasUrl = `https://coastwatch.noaa.gov/erddap/griddap/${datasetId}.das`;
+      const dasR = await fetch(dasUrl);
+      if (dasR.ok) dasContent = await dasR.text();
+    } catch (dasErr) {
+      dasContent = `(.das-haku itsekin epaonnistui: ${dasErr.message})`;
+    }
+    return json({
+      error: e.message,
+      step: 'sst-anomaly',
+      erddap_url: erddapUrl,
+      huom: `Muuttujanimi "${varName}" oli arvio. Alla datasetin oma .das-tiedosto joka listaa KAIKKI oikeat muuttujanimet - etsi rivi jossa on ioos_category "Temperature" tai vastaava.`,
+      dataset_das: dasContent,
+    }, 502);
   }
 }
 
