@@ -100,8 +100,12 @@ async function handleSSTAnomaly(url) {
   // muuttujan nimi vaarin. Kokeillaan CRW-tuotteiden yleista
   // nimeamiskaytantoa (isot kirjaimet + alaviiva, esim. CRW_DHW
   // "degree heating week" -datasetissa) - EDELLEEN ARVIO.
+  // VAHVISTETTU 2026-07-30 (kolmas yritys, .das-varajarjestely toimi):
+  // oikea muuttujan nimi on "sea_surface_temperature_anomaly" -
+  // ERDDAP:n oma .das-tiedosto paljasti taman suoraan kun aiemmat
+  // arvaukset (sstAnom, CRW_SSTANOMALY) epaonnistuivat.
   const datasetId = 'noaacrwsstanomalyDaily';
-  const varName = 'CRW_SSTANOMALY';
+  const varName = 'sea_surface_temperature_anomaly';
   const erddapUrl = `https://coastwatch.noaa.gov/erddap/griddap/${datasetId}.csv?${varName}[(${date}T00:00:00Z)][(${lat})][(${lon})]`;
 
   try {
