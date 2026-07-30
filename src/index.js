@@ -31,7 +31,8 @@ async function handleStatus() {
     reference_doc: 'https://aethercontinuity.org/tools/amoc-instrument-plan.md',
     routes: {
       '/status': 'Taman sivun tila',
-      '/sla': 'Merenpinnan korkeuspoikkeama (Sentinel-6-tyyppinen data) - NOAA ERDDAP · ?lat=...&lon=...&date=YYYY-MM-DD · LUOTETTAVA',
+      '/sla': 'Merenpinnan korkeuspoikkeama, yksi piste (Sentinel-6-tyyppinen data) - NOAA ERDDAP · ?lat=...&lon=...&date=YYYY-MM-DD · LUOTETTAVA MUTTA EI GEOSTROFINEN (yksi piste ei tuota gradienttia)',
+      '/sla-gradient': 'Ita-lansi-korkeusero 26.5N (kokeellinen approksimaatio RAPID:n menetelmasta) - ?lat=...&lonWest=...&lonEast=...&date=YYYY-MM-DD',
       '/sst-anomaly': 'Meriveden lampotila-anomalia - NOAA ERDDAP (OISST) · ?lat=...&lon=...&date=YYYY-MM-DD · LUOTETTAVA',
       '/rapid-info': 'RAPID-AMOC-projektin README (viite/metatiedot, ei viela itse data-arvoja) · EI PARAMETREJA',
       '/greenland-smb': 'Gronlannin pintamassatase - DMI Polar Portal · EI PARAMETREJA (palauttaa koko sarjan) · LUOTETTAVA',
@@ -66,10 +67,58 @@ async function handleSLA(url) {
       lahde: 'NOAA CoastWatch ERDDAP, dataset noaacwBLENDEDsshDaily',
       kysely: { lat, lon, date },
       raaka_csv: csvText,
-      huom: 'Positiivinen arvo = merenpinta korkeampi kuin keskimaarin. Geostrofiset virtaukset voidaan johtaa naapuripisteiden gradientista - ei viela laskettu tassa versiossa.',
+      huom: 'Yksi piste EI riita geostrofisen gradientin laskentaan (gradientti on maaritelmallisesti kahden pisteen erotus) - kayta /sla-gradient-reittia jos tarvitset ita-lansi-eroa. Tama reitti on kokeellinen aikasarja, ei geostrofinen lahde sellaisenaan.',
     });
   } catch (e) {
     return json({ error: e.message, step: 'sla', erddap_url: erddapUrl }, 502);
+  }
+}
+
+// ── /sla-gradient — Ita-lansi-korkeusero 26.5N, RAPID:n oman metodin mukaisesti ──
+// LISATTY 2026-07-30, kayttajan (ja hanen harrastelijaystavansa) oma
+// fysikaalinen kritiikki: yhden pisteen SLA EI VOI tuottaa geostrofista
+// gradienttia, koska gradientti on maaritelmallisesti kahden pisteen
+// erotus. RAPID:n oma menetelma summaa Florida-salmen (lansireuna) +
+// sisaosan geostrofinen + Kanariansaaret (itareuna) -komponentit.
+// Tama reitti approksimoi tata: lansipiste ~75W (lahella Floridan
+// salmea), itapiste ~15W (lahella Kanariansaaria), molemmat 26.5N.
+// HUOM: tama ei ole sama kuin RAPID:n oma, tarkka laskenta (joka
+// kayttaa taysia syvyysprofiileja, ei vain pintakorkeutta) - tama on
+// karkea, kokeellinen approksimaatio samasta periaatteesta.
+async function handleSLAGradient(url) {
+  const lat = url.searchParams.get('lat') || '26.5';
+  const lonWest = url.searchParams.get('lonWest') || '-75';
+  const lonEast = url.searchParams.get('lonEast') || '-15';
+  const date = url.searchParams.get('date') || new Date().toISOString().slice(0, 10);
+
+  const urlWest = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${date}T00:00:00Z)][(${lat})][(${lonWest})]`;
+  const urlEast = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${date}T00:00:00Z)][(${lat})][(${lonEast})]`;
+
+  try {
+    const [rWest, rEast] = await Promise.all([fetch(urlWest), fetch(urlEast)]);
+    if (!rWest.ok) throw new Error(`Lansipiste ERDDAP HTTP ${rWest.status}: ${await rWest.text()}`);
+    if (!rEast.ok) throw new Error(`Itapiste ERDDAP HTTP ${rEast.status}: ${await rEast.text()}`);
+
+    const parseSLA = (csv) => {
+      const lines = csv.trim().split('\n');
+      const last = lines[lines.length - 1].split(',');
+      return { time: last[0], lat: parseFloat(last[1]), lon: parseFloat(last[2]), sla: parseFloat(last[3]) };
+    };
+    const west = parseSLA(await rWest.text());
+    const east = parseSLA(await rEast.text());
+    const gradient = east.sla - west.sla;
+
+    return json({
+      bem_e_tyylinen_komponentti: 'AMOC — ita-lansi-korkeusero (kokeellinen, ei RAPID:n tarkka menetelma)',
+      lahde: 'NOAA CoastWatch ERDDAP, kaksi pistetta samalta leveyspiirilta',
+      kysely: { lat, lonWest, lonEast, date },
+      lansipiste: west,
+      itapiste: east,
+      korkeusero_m: Number(gradient.toFixed(4)),
+      huom: 'Tama approksimoi RAPID:n oman menetelman periaatetta (lansi+sisaosa+ita-komponentit) mutta KARKEASTI - ei kayta taysia syvyysprofiileja kuten RAPID itse. Yhden paivan arvo on todennakoisesti enemman mesoskaalapyorteiden kohinaa kuin AMOC-signaalia - tarvitaan vahintaan 30-60 vrk liukuva keskiarvo ennen tulkintaa (kayttajan oma huomio 2026-07-30).',
+    });
+  } catch (e) {
+    return json({ error: e.message, step: 'sla-gradient' }, 502);
   }
 }
 
@@ -230,6 +279,8 @@ export default {
         return await handleStatus();
       } else if (path === '/sla') {
         return await handleSLA(url);
+      } else if (path === '/sla-gradient') {
+        return await handleSLAGradient(url);
       } else if (path === '/sst-anomaly') {
         return await handleSSTAnomaly(url);
       } else if (path === '/rapid-info') {
