@@ -145,34 +145,30 @@ async function handleSSTAnomaly(url) {
   }
 }
 
-// ── /rapid-info — RAPID-AMOC:n oma README, vahvistettu avoimeksi ──
-// EI VIELA parsi itse data-arvoja (moc_transports-tiedoston tarkka
-// URL ei viela varmistettu) - palauttaa vain viitetekstin.
+// ── /rapid-info — RAPID-AMOC:n viitetilastot, staattinen ──
+// KORJATTU 2026-07-30: alkuperainen versio haki README.pdf:n joka
+// osoitti live-testissa "onk"-tuloksen web_fetch-tyokalulla, MUTTA
+// Cloudflare Workerin oma fetch() sai HTTP 404 samasta osoitteesta -
+// todennakoisesti rapid.ac.uk kohtelee Cloudflaren edge-liikennetta
+// eri tavalla (botti-suodatus tms.). Koska tama reitti ei muutenkaan
+// lataa mitaan aidosti elavaa dataa (vain viitetilastot, jotka olivat
+// jo kovakoodattuina), yksinkertaisin ja kestavin korjaus on poistaa
+// epaluotettava verkkoriippuvuus kokonaan.
 async function handleRapidInfo() {
-  const readmeUrl = 'https://rapid.ac.uk/sites/default/files/rapid_data/README.pdf';
-  try {
-    const r = await fetch(readmeUrl);
-    if (!r.ok) {
-      throw new Error(`HTTP ${r.status}`);
-    }
-    return json({
-      bem_e_tyylinen_komponentti: 'AMOC — RAPID-taulukko (26.5N), viitetiedot',
-      lahde: 'rapid.ac.uk (BODC/NERC/NSF/NOAA-rahoitteinen)',
-      huom: 'Tama reitti hakee vain README:n vahvistaakseen etta yhteys toimii ilman kirjautumista. Itse MOC-kuljetusarvot (Sv) vaativat viela erillisen, tarkemman datatiedoston loytamisen - ks. amoc-instrument-plan.md kohta "Seuraavat askeleet".',
-      tunnetut_tilastot_2004_2024: {
-        gulf_stream_sv: '31.8 +/- 3.4',
-        ekman_sv: '3.8 +/- 3.4',
-        yla_keskiokeaani_sv: '-18.4 +/- 3.4',
-        moc_sv: '17.1 +/- 4.4',
-        unadw_sv: '-12.1 +/- 2.5',
-        lnadw_sv: '-5.8 +/- 2.8',
-        lahde: 'rapid.ac.uk/data/integrated-transports (haettu 2026-07-30)',
-      },
-      readme_saatavilla: r.ok,
-    });
-  } catch (e) {
-    return json({ error: e.message, step: 'rapid-info' }, 502);
-  }
+  return json({
+    bem_e_tyylinen_komponentti: 'AMOC — RAPID-taulukko (26.5N), viitetiedot',
+    lahde: 'rapid.ac.uk (BODC/NERC/NSF/NOAA-rahoitteinen)',
+    huom: 'Staattiset viitetilastot - ei live-hakua (rapid.ac.uk kohteli Cloudflare Workerin liikennetta eri tavalla kuin web_fetch-tyokalua, HTTP 404 vaikka osoite on oikea). Itse MOC-kuljetusarvot (Sv) vaativat viela erillisen, tarkemman datatiedoston loytamisen - ks. amoc-instrument-plan.md kohta "Seuraavat askeleet".',
+    tunnetut_tilastot_2004_2024: {
+      gulf_stream_sv: '31.8 +/- 3.4',
+      ekman_sv: '3.8 +/- 3.4',
+      yla_keskiokeaani_sv: '-18.4 +/- 3.4',
+      moc_sv: '17.1 +/- 4.4',
+      unadw_sv: '-12.1 +/- 2.5',
+      lnadw_sv: '-5.8 +/- 2.8',
+      lahde: 'rapid.ac.uk/data/integrated-transports (haettu 2026-07-30)',
+    },
+  });
 }
 
 // ── /greenland-smb — Gronlannin pintamassatase, DMI Polar Portal ──
