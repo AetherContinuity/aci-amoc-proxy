@@ -34,10 +34,11 @@ async function handleStatus() {
       '/sla': 'Merenpinnan korkeuspoikkeama (Sentinel-6-tyyppinen data) - NOAA ERDDAP · ?lat=...&lon=...&date=YYYY-MM-DD · LUOTETTAVA',
       '/sst-anomaly': 'Meriveden lampotila-anomalia - NOAA ERDDAP (OISST) · ?lat=...&lon=...&date=YYYY-MM-DD · LUOTETTAVA',
       '/rapid-info': 'RAPID-AMOC-projektin README (viite/metatiedot, ei viela itse data-arvoja) · EI PARAMETREJA',
+      '/greenland-smb': 'Gronlannin pintamassatase - DMI Polar Portal · EI PARAMETREJA (palauttaa koko sarjan) · LUOTETTAVA',
     },
     ei_viela_toteutettu: {
       rapid_data: 'Itse moc_transports-datatiedoston tarkka URL/formaatti ei viela varmistettu',
-      greenland_grace: 'TU Dresden -portaalin (data1.geo.tu-dresden.de/gis_gmb/) tarkka kyselymuoto ei viela selvitetty',
+      greenland_grace: 'PODAAC:n GRACE-kokonaismassatase vaatii aidon NASA Earthdata-kirjautumisen (vahvistettu, ei kierrettavissa). /greenland-smb tarjoaa avoimen VAIHTOEHDON (pintamassatase, ei sama suure).',
     },
     caveat: 'Kaikki reitit LUOTETTAVA-merkinnalla on vahvistettu web_fetch-testeilla 2026-07-30, mutta EI VIELA taman proxyn omalla live-testilla (Cloudflare-ymparistosta). Tarkista aina ensimmaisella kayttokerralla.',
   });
@@ -174,6 +175,51 @@ async function handleRapidInfo() {
   }
 }
 
+// ── /greenland-smb — Gronlannin pintamassatase, DMI Polar Portal ──
+// LISATTY 2026-07-30. Taysin avoin, ei kirjautumista - vahvistettu
+// web_fetch:illa. HUOM: tama on PINTAmassatase (SMB, malli: sadanta -
+// sulaminen), EI GRACE:n oma kokonaismassatase (joka sisaltaisi myos
+// jaatikoiden kalvamisen/discharge). Eri mutta laheisesti liittyva
+// suure - PODAAC:n GRACE-data vaatisi aidon Earthdata-kirjautumisen
+// (vahvistettu, ei kierrettavissa), tama on paras avoin vaihtoehto.
+async function handleGreenlandSMB() {
+  const smbUrl = 'https://download.dmi.dk/Research_Projects/polarportal/PP_GSMB/GSMB.txt';
+  try {
+    const r = await fetch(smbUrl);
+    if (!r.ok) {
+      throw new Error(`DMI HTTP ${r.status}`);
+    }
+    const text = await r.text();
+    // Jasennetaan rivit jotka alkavat 8-numeroisella paivamaaralla
+    // (YYYYMMDD SMB(Gt/d) SMBacc(Gt)) - loppuosa tiedostosta on
+    // vapaamuotoista tekstia/otsikoita jotka ohitetaan.
+    const lines = text.split('\n');
+    const dataLines = lines
+      .map(l => l.trim())
+      .filter(l => /^\d{8}\s+-?\d+\.?\d*\s+-?\d+\.?\d*$/.test(l));
+    const parsed = dataLines.map(l => {
+      const [dateStr, smb, smbAcc] = l.split(/\s+/);
+      return {
+        date: `${dateStr.slice(0,4)}-${dateStr.slice(4,6)}-${dateStr.slice(6,8)}`,
+        smb_gt_per_day: parseFloat(smb),
+        smb_acc_gt: parseFloat(smbAcc),
+      };
+    });
+    const latest = parsed[parsed.length - 1] || null;
+
+    return json({
+      bem_e_tyylinen_komponentti: 'AMOC — Gronlannin makean veden indikaattori (pintamassatase)',
+      lahde: 'DMI Polar Portal (download.dmi.dk), HARMONIE-AROME IGB -malli',
+      huom: 'PINTAmassatase (sadanta - sulaminen), EI GRACE:n kokonaismassatase (ei sisalla jaatikoiden kalvamista). PODAAC:n GRACE-data vaatisi aidon NASA Earthdata -kirjautumisen (vahvistettu, ei kierrettavissa) - tama on paras avoin vaihtoehto.',
+      pisteita_jasennetty: parsed.length,
+      viimeisin: latest,
+      koko_sarja: parsed,
+    });
+  } catch (e) {
+    return json({ error: e.message, step: 'greenland-smb', smb_url: smbUrl }, 502);
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -192,6 +238,8 @@ export default {
         return await handleSSTAnomaly(url);
       } else if (path === '/rapid-info') {
         return await handleRapidInfo();
+      } else if (path === '/greenland-smb') {
+        return await handleGreenlandSMB();
       }
       return json({ error: `Unknown route: ${path}` }, 404);
     } catch (e) {
