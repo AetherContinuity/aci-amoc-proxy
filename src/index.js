@@ -39,6 +39,7 @@ async function handleStatus() {
       '/rapid-info': 'RAPID-AMOC-projektin README (viite/metatiedot, ei viela itse data-arvoja) · EI PARAMETREJA',
       '/greenland-smb': 'Gronlannin pintamassatase - DMI Polar Portal · EI PARAMETREJA (palauttaa koko sarjan) · LUOTETTAVA',
       '/nao': 'Pohjois-Atlantin oskillaatio - NOAA PSL · ?date=YYYY-MM-DD (yksi arvo) tai ?date=...&days=N (aikasarja) · LUOTETTAVA, mutta hidas suurilla days-arvoilla (koko 1948-tiedosto haetaan joka kerta)',
+      '/sla-gradient-nao-correlation': 'Pearson-korrelaatio ita-lansi-gradientin ja NAO:n valilla - ?lat=...&lonWest=...&lonEast=...&endDate=YYYY-MM-DD&days=N · HUOM: NAO-data ~4.5kk viiveella, vain paallekkaiset paivat kaytetaan',
     },
     ei_viela_toteutettu: {
       rapid_data: 'Itse moc_transports-datatiedoston tarkka URL/formaatti ei viela varmistettu',
@@ -464,6 +465,100 @@ async function handleNAO(url) {
   }
 }
 
+// ── /sla-gradient-nao-correlation — Pearson-korrelaatio gradientin ja NAO:n valilla ──
+// LISATTY 2026-07-30. Silmamaarainen vertailu osoittautui ristiriitaiseksi
+// (marraskuu 2025: NAO aarimm. negatiivinen, gradientti positiivinen -
+// helmi-maalis 2026: molemmat positiivisia) - sama periaate kuin WEM:n
+// hinta/tuuli-kaaviossa: lasketaan tasmallinen Pearson r, ei luoteta
+// vaikutelmaan. HUOM: NAO-data ei ulotu yhta pitkalle kuin gradientti
+// (havaittu: viimeisin NAO-piste 2026-03-17, ~4.5kk viive) - vain
+// paallekkaiset paivamaarat kaytetaan.
+async function handleSLAGradientNAOCorrelation(url) {
+  const lat = url.searchParams.get('lat') || '26.5';
+  const lonWest = url.searchParams.get('lonWest') || '-75';
+  const lonEast = url.searchParams.get('lonEast') || '-15';
+  const days = parseInt(url.searchParams.get('days') || '365', 10);
+  const endDate = url.searchParams.get('endDate') || new Date(Date.now() - 3*24*3600*1000).toISOString().slice(0, 10);
+
+  const end = new Date(endDate + 'T00:00:00Z');
+  const start = new Date(end.getTime() - days * 24 * 3600 * 1000);
+  const startStr = start.toISOString().slice(0, 10);
+
+  const urlWest = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${startStr}T00:00:00Z):(${endDate}T00:00:00Z)][(${lat})][(${lonWest})]`;
+  const urlEast = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${startStr}T00:00:00Z):(${endDate}T00:00:00Z)][(${lat})][(${lonEast})]`;
+  const naoUrl = 'https://downloads.psl.noaa.gov/Public/map/teleconnections/nao.reanalysis.t10trunc.1948-present.txt';
+
+  try {
+    const [rWest, rEast, rNAO] = await Promise.all([fetch(urlWest), fetch(urlEast), fetch(naoUrl)]);
+    if (!rWest.ok) throw new Error(`Lansipiste ERDDAP HTTP ${rWest.status}`);
+    if (!rEast.ok) throw new Error(`Itapiste ERDDAP HTTP ${rEast.status}`);
+    if (!rNAO.ok) throw new Error(`NAO HTTP ${rNAO.status}`);
+
+    const parseRows = (csv) => {
+      const lines = csv.trim().split('\n').slice(2);
+      return lines.map(l => {
+        const [time, , , sla] = l.split(',');
+        return { date: time.slice(0, 10), sla: parseFloat(sla) };
+      }).filter(r => !Number.isNaN(r.sla));
+    };
+    const westRows = parseRows(await rWest.text());
+    const eastRows = parseRows(await rEast.text());
+    const westByDate = new Map(westRows.map(r => [r.date, r.sla]));
+    const gradientByDate = new Map();
+    eastRows.forEach(r => {
+      if (westByDate.has(r.date)) gradientByDate.set(r.date, r.sla - westByDate.get(r.date));
+    });
+
+    const naoText = await rNAO.text();
+    const naoLines = naoText.split('\n')
+      .map(l => l.trim())
+      .filter(l => /^\d{4}\s+\d{1,2}\s+\d{1,2}\s+-?\d+\.?\d*$/.test(l));
+    const naoByDate = new Map();
+    naoLines.forEach(l => {
+      const parts = l.split(/\s+/);
+      const dateStr = `${parts[0]}-${parts[1].padStart(2,'0')}-${parts[2].padStart(2,'0')}`;
+      naoByDate.set(dateStr, parseFloat(parts[3]));
+    });
+
+    // Yhdistetaan VAIN paivamaarat joilta molemmat sarjat loytyvat
+    const paired = [];
+    for (const [date, gradient] of gradientByDate) {
+      if (naoByDate.has(date)) {
+        paired.push({ date, gradient, nao: naoByDate.get(date) });
+      }
+    }
+    paired.sort((a, b) => a.date.localeCompare(b.date));
+
+    if (paired.length < 3) {
+      throw new Error(`Liian vahan paallekkaisia paivamaaria (${paired.length}) korrelaation laskentaan - NAO-data ei todennakoisesti ulotu pyydetylle valille`);
+    }
+
+    // Pearsonin korrelaatiokerroin
+    const n = paired.length;
+    const xs = paired.map(p => p.gradient), ys = paired.map(p => p.nao);
+    const mx = xs.reduce((a,b)=>a+b,0)/n, my = ys.reduce((a,b)=>a+b,0)/n;
+    let cov=0, vx=0, vy=0;
+    for (let i=0;i<n;i++){ const dx=xs[i]-mx, dy=ys[i]-my; cov+=dx*dy; vx+=dx*dx; vy+=dy*dy; }
+    const r = cov / Math.sqrt(vx*vy);
+
+    const naoLastDate = [...naoByDate.keys()].sort().pop();
+
+    return json({
+      bem_e_tyylinen_komponentti: 'AMOC — ita-lansi-gradientin ja NAO:n Pearson-korrelaatio',
+      lahde: 'NOAA CoastWatch ERDDAP (gradientti) + NOAA PSL (NAO)',
+      kysely: { lat, lonWest, lonEast, startDate: startStr, endDate, pyydettyPaivia: days },
+      paallekkaisia_paivia: n,
+      pearson_r: Number(r.toFixed(4)),
+      nao_datan_viimeisin_paiva: naoLastDate,
+      huom: r < -0.3 ? 'Kohtalainen/vahva NEGATIIVINEN korrelaatio - odotettu suunta jos NAO kuvaa lantisen reunan lampovuota kaanteisesti gradienttiin' :
+            r > 0.3 ? 'Kohtalainen/vahva POSITIIVINEN korrelaatio' :
+            'Heikko tai olematon korrelaatio (|r|<0.3) - silmamaarainen vaikutelma ei saanut tilastollista tukea talla otoksella',
+    });
+  } catch (e) {
+    return json({ error: e.message, step: 'sla-gradient-nao-correlation' }, 502);
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -492,6 +587,8 @@ export default {
         return await handleGreenlandSMB();
       } else if (path === '/nao') {
         return await handleNAO(url);
+      } else if (path === '/sla-gradient-nao-correlation') {
+        return await handleSLAGradientNAOCorrelation(url);
       }
       return json({ error: `Unknown route: ${path}` }, 404);
     } catch (e) {
