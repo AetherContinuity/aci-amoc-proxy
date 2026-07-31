@@ -182,7 +182,7 @@ async function handleSLAGradientAnomaly(url) {
       gradientti_m: Number(gradient.toFixed(5)),
       klimatologia_m: climatology,
       anomalia_m: Number(anomaly.toFixed(5)),
-      huom: 'Anomalia = gradientti miinus SAMAN KUUKAUDEN historiallinen keskiarvo (2 vuoden data). Tama poistaa vahvan, toistuvan vuosisyklin (helmi-maaliskuu +0.12, elo-syyskuu -0.10) - jaljelle jaava anomalia on todennakoisemmin AMOC-relevantti signaali kuin raaka gradientti. HUOM: klimatologia perustuu vain 2 vuoteen - karkea ensimmainen arvio, ei vakiintunut normaali.',
+      huom: 'KORJATTU YMMARRYS 2026-07-30: kolme lisavuosiparia (2019-2020, 2020-2021) paljastivat etta jokainen vuosi nayttaa TAYSIN ERI vaiheen (pohja/huippu eri kuukausina) - talla ei siis olekaan kiintea, kalenteriin sidottu vuosisykli. Kirjallisuushaku selitti taman: Frajka-Williams (2015) ja RAPID:n oma 20v yhteenveto vahvistavat etta tama signaali (UMO-proksi 26N) on VUOSIENVALISEN (interannual, Rossby-aalto-) vaihtelun hallitsema, ei kausivaihtelun. Alla oleva anomalia_m kuvaa siis eroa vain KAHDEN VUODEN otokseen, EI vakiintunutta normaalia - tulkitse varovasti. Ks. amoc-instrument-plan.md kohta "KORJAUS 2026-07-30".',
     });
   } catch (e) {
     return json({ error: e.message, step: 'sla-gradient-anomaly' }, 502);
