@@ -34,6 +34,7 @@ async function handleStatus() {
       '/sla': 'Merenpinnan korkeuspoikkeama, yksi piste (Sentinel-6-tyyppinen data) - NOAA ERDDAP · ?lat=...&lon=...&date=YYYY-MM-DD · LUOTETTAVA MUTTA EI GEOSTROFINEN (yksi piste ei tuota gradienttia)',
       '/sla-gradient': 'Ita-lansi-korkeusero 26.5N (kokeellinen approksimaatio RAPID:n menetelmasta) - ?lat=...&lonWest=...&lonEast=...&date=YYYY-MM-DD',
       '/sla-gradient-mean': '30 vrk (oletus) liukuva keskiarvo ita-lansi-korkeuserosta, tasoittaa mesoskaalakohinaa - ?lat=...&lonWest=...&lonEast=...&endDate=YYYY-MM-DD&days=N',
+      '/sla-gradient-anomaly': 'Kausikorjattu anomalia (gradientti miinus kuukauden klimatologia, 2v data) - ?lat=...&lonWest=...&lonEast=...&date=YYYY-MM-DD',
       '/sst-anomaly': 'Meriveden lampotila-anomalia - NOAA ERDDAP (OISST) · ?lat=...&lon=...&date=YYYY-MM-DD · LUOTETTAVA',
       '/rapid-info': 'RAPID-AMOC-projektin README (viite/metatiedot, ei viela itse data-arvoja) · EI PARAMETREJA',
       '/greenland-smb': 'Gronlannin pintamassatase - DMI Polar Portal · EI PARAMETREJA (palauttaa koko sarjan) · LUOTETTAVA',
@@ -132,6 +133,62 @@ async function handleSLAGradient(url) {
 // Tama reitti hakee 30 vrk aikasarjan MOLEMMILLE pisteille samalla,
 // jo vahvistetusti toimivalla ERDDAP-lahteella (ei uutta CMEMS-avainta
 // tarvita), laskee paivittaisen gradientin ja sen 30 vrk keskiarvon.
+// ── Kuukausittainen klimatologia ita-lansi-gradientille ──
+// LISATTY 2026-07-30. Laskettu kahdesta havaitusta vuodesta
+// (2024-07-28...2025-07-28 ja 2025-07-28...2026-07-28, yhteensa 729
+// paivaa) samalta lansi(~75W)/ita(~15W)/26.5N-pisteparilta kuin
+// /sla-gradient kayttaa. Paljastaa selvan kausisyklin: helmi-maaliskuu
+// huippu (~+0.12), elo-syyskuu pohja (~-0.10) - todennakoisesti
+// steerinen (lampolaajenemis-) ilmio, ei AMOC-signaali sellaisenaan
+// (ks. amoc-instrument-plan.md). Kayttajan oma prioriteetti 2026-07-30:
+// kausikorjattu anomalia on arvokkaampi kuin raaka arvo tai
+// kausivaihtelun peittama liukuva keskiarvo.
+const GRADIENT_CLIMATOLOGY_BY_MONTH = {
+  1: 0.0149, 2: 0.1183, 3: 0.1249, 4: 0.0806, 5: 0.0675, 6: 0.0175,
+  7: -0.0288, 8: -0.0964, 9: -0.1024, 10: 0.0194, 11: 0.0317, 12: 0.0073,
+};
+
+async function handleSLAGradientAnomaly(url) {
+  const lat = url.searchParams.get('lat') || '26.5';
+  const lonWest = url.searchParams.get('lonWest') || '-75';
+  const lonEast = url.searchParams.get('lonEast') || '-15';
+  const date = url.searchParams.get('date') || new Date(Date.now() - 3*24*3600*1000).toISOString().slice(0, 10);
+
+  const urlWest = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${date}T00:00:00Z)][(${lat})][(${lonWest})]`;
+  const urlEast = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${date}T00:00:00Z)][(${lat})][(${lonEast})]`;
+
+  try {
+    const [rWest, rEast] = await Promise.all([fetch(urlWest), fetch(urlEast)]);
+    if (!rWest.ok) throw new Error(`Lansipiste ERDDAP HTTP ${rWest.status}: ${await rWest.text()}`);
+    if (!rEast.ok) throw new Error(`Itapiste ERDDAP HTTP ${rEast.status}: ${await rEast.text()}`);
+
+    const parseSLA = (csv) => {
+      const lines = csv.trim().split('\n');
+      const last = lines[lines.length - 1].split(',');
+      return { time: last[0], sla: parseFloat(last[3]) };
+    };
+    const west = parseSLA(await rWest.text());
+    const east = parseSLA(await rEast.text());
+    const gradient = east.sla - west.sla;
+
+    const month = parseInt(date.split('-')[1], 10);
+    const climatology = GRADIENT_CLIMATOLOGY_BY_MONTH[month];
+    const anomaly = gradient - climatology;
+
+    return json({
+      bem_e_tyylinen_komponentti: 'AMOC — ita-lansi-korkeuseron kausikorjattu anomalia',
+      lahde: 'NOAA CoastWatch ERDDAP + kovakoodattu klimatologia (729 paivaa, 2024-2026)',
+      kysely: { lat, lonWest, lonEast, date, kuukausi: month },
+      gradientti_m: Number(gradient.toFixed(5)),
+      klimatologia_m: climatology,
+      anomalia_m: Number(anomaly.toFixed(5)),
+      huom: 'Anomalia = gradientti miinus SAMAN KUUKAUDEN historiallinen keskiarvo (2 vuoden data). Tama poistaa vahvan, toistuvan vuosisyklin (helmi-maaliskuu +0.12, elo-syyskuu -0.10) - jaljelle jaava anomalia on todennakoisemmin AMOC-relevantti signaali kuin raaka gradientti. HUOM: klimatologia perustuu vain 2 vuoteen - karkea ensimmainen arvio, ei vakiintunut normaali.',
+    });
+  } catch (e) {
+    return json({ error: e.message, step: 'sla-gradient-anomaly' }, 502);
+  }
+}
+
 async function handleSLAGradientMean(url) {
   const lat = url.searchParams.get('lat') || '26.5';
   const lonWest = url.searchParams.get('lonWest') || '-75';
@@ -359,6 +416,8 @@ export default {
         return await handleSLAGradient(url);
       } else if (path === '/sla-gradient-mean') {
         return await handleSLAGradientMean(url);
+      } else if (path === '/sla-gradient-anomaly') {
+        return await handleSLAGradientAnomaly(url);
       } else if (path === '/sst-anomaly') {
         return await handleSSTAnomaly(url);
       } else if (path === '/rapid-info') {
