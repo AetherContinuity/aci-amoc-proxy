@@ -762,6 +762,17 @@ const SERIES_PROVIDERS = {
   rapid: fetchRAPIDSeries,
 };
 
+// LISATTY 2026-07-31, kayttajan oma ehdotus: metadata jokaiselle
+// sarjalle (lahde, yksikko) - helpottaa yllapitoa kun RAPID/SST/SMB
+// -parien maara kasvaa.
+const SERIES_METADATA = {
+  sla: { source: 'NOAA CoastWatch ERDDAP (noaacwBLENDEDsshDaily)', units: 'm (ita-lansi-ero, 26.5N)' },
+  nao: { source: 'NOAA CPC (paivittainen normalisoitu, station-based)', units: 'index (normalisoitu)' },
+  sst: { source: 'NOAA ERDDAP (noaacrwsstanomalyDaily)', units: 'degree_C (anomalia)' },
+  smb: { source: 'DMI Polar Portal (HARMONIE-AROME)', units: 'Gt/vrk (pintamassatase)' },
+  rapid: { source: 'EI VIELA SAATAVILLA - ks. amoc-instrument-plan.md Vaihe 4', units: 'Sv' },
+};
+
 // ── Tilastofunktiot: Spearman + effective N (autokorrelaatiokorjattu) ──
 function ranks(arr) {
   const idx = arr.map((v, i) => i).sort((a, b) => arr[a] - arr[b]);
@@ -785,15 +796,38 @@ function spearmanRho(xs, ys) {
 // aiemmin: Rossby-aallot etenevat hitaasti) - tavallinen Pearsonin
 // p-arvo N:lla olisi liian optimistinen (nayttaisi merkitsevammalta
 // kuin todellisuudessa on).
-function lag1Autocorr(series) {
-  if (series.length < 3) return 0;
-  return pearsonR(series.slice(0, -1), series.slice(1));
+//
+// PAIVITETTY 2026-07-31, kayttajan oma tekninen huomio: alkuperainen
+// versio kaytti vain LAG-1-autokorrelaatiota, mutta ilmastoaikasarjoissa
+// autokorrelaatio ulottuu usein useille viiveille. Pyper & Peterman
+// (1998) -alkuperaisessa menetelmassa kaytetaan koko ACF:aa:
+//   Neff = N / (1 + 2*sum_{k=1}^{m} rho_x(k)*rho_y(k))
+// Katkaisuraja m = min(N/5, 30) (yleinen nyrkkisaanto, valttaa kohinaa
+// korkeilta viiveilta joissa autokorrelaatioestimaatti on epaluotettava
+// pienesta jaljella olevasta otoksesta).
+function autocorrAtLag(series, k) {
+  if (k >= series.length - 2) return 0;
+  return pearsonR(series.slice(0, -k), series.slice(k));
 }
 function effectiveN(xs, ys) {
   const n = xs.length;
-  const r1x = lag1Autocorr(xs), r1y = lag1Autocorr(ys);
-  const raw = n * (1 - r1x * r1y) / (1 + r1x * r1y);
-  return { neff: Math.max(2, Math.min(n, raw)), r1x: Number(r1x.toFixed(3)), r1y: Number(r1y.toFixed(3)) };
+  const m = Math.min(Math.floor(n / 5), 30);
+  let sum = 0;
+  for (let k = 1; k <= m; k++) {
+    sum += autocorrAtLag(xs, k) * autocorrAtLag(ys, k);
+  }
+  const denom = 1 + 2 * sum;
+  const raw = denom > 0 ? n / denom : n;
+  // Sailytetaan myos lag-1-arvot omana kenttanaan - yhteensopivuus ja
+  // luettavuus (helpompi tulkita yhta lukua kuin koko ACF-summaa)
+  const r1x = autocorrAtLag(xs, 1), r1y = autocorrAtLag(ys, 1);
+  return {
+    neff: Math.max(2, Math.min(n, raw)),
+    r1x: Number(r1x.toFixed(3)),
+    r1y: Number(r1y.toFixed(3)),
+    acf_lags_used: m,
+    acf_sum: Number(sum.toFixed(4)),
+  };
 }
 
 async function handleCompare(url) {
@@ -845,7 +879,7 @@ async function handleCompare(url) {
     }
     const r0 = pearsonR(lag0.xs, lag0.ys);
     const rho0 = spearmanRho(lag0.xs, lag0.ys);
-    const { neff, r1x, r1y } = effectiveN(lag0.xs, lag0.ys);
+    const { neff, r1x, r1y, acf_lags_used, acf_sum } = effectiveN(lag0.xs, lag0.ys);
 
     let bestLag = 0, bestR = r0, bestN = lag0.xs.length;
     const lagScan = [];
@@ -876,6 +910,10 @@ async function handleCompare(url) {
       bem_e_tyylinen_komponentti: `AMOC — yleinen sarjavertailu: ${seriesA} vs ${seriesB}`,
       lahde: 'ACI yleinen kahden aikasarjan vertailumoottori',
       kysely: { series_a: seriesA, series_b: seriesB, date: endDate, days, maxLag },
+      metadata: {
+        series_a: { name: seriesA, ...(SERIES_METADATA[seriesA] || {}) },
+        series_b: { name: seriesB, ...(SERIES_METADATA[seriesB] || {}) },
+      },
       series: {
         [`${seriesA}_observations`]: allDates.length,
         [`${seriesB}_observations`]: bAvailable.length,
@@ -890,6 +928,7 @@ async function handleCompare(url) {
         raw_n: lag0.xs.length,
         lag1_autocorr_a: r1x,
         lag1_autocorr_b: r1y,
+        acf_lags_used_in_neff: acf_lags_used,
         p_value: pValueNeff,
         lag_0: 0,
         lag_best: bestLag,
@@ -898,11 +937,14 @@ async function handleCompare(url) {
       },
       lag_spectrum: {
         min_lag: -maxLag, max_lag: maxLag, step: 1,
+        n_lags_tested: lagScan.length,
         peak_correlation: Number(bestR.toFixed(4)), peak_at_lag: bestLag,
         full_scan: lagScan,
       },
       interpretation,
       notes: [
+        `Paras lag (${bestLag}) valittu ${lagScan.length} testatusta viiveesta - ei korjattu monivertailulle (esim. Benjamini-Hochberg FDR). Suhtaudu "parhaaseen" lagiin varovasti, tama on tunnistettu, ei viela korjattu rajoite (ks. amoc-instrument-plan.md).`,
+        `Effective N laskettu taydella ACF:lla (Pyper & Peterman 1998 -tyylinen, ${acf_lags_used} viivetta huomioitu, ei vain lag-1) - ACF-summa=${acf_sum}`,
         `p-arvo laskettu EFFECTIVE N:lla (${neff.toFixed(0)}), ei raa'alla N:lla (${lag0.xs.length}) - molemmat sarjat autokorreloituneita (lag-1: ${r1x}/${r1y}), tavallinen p-arvo olisi liian optimistinen`,
         'Spearman rho tunnistaa monotonisen yhteyden vaikka Pearson (lineaarinen) olisi heikko - vertaa molempia',
         'lag>0 tarkoittaa: series_b edeltaa series_a:ta',
