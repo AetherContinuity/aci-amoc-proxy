@@ -40,7 +40,7 @@ async function handleStatus() {
       '/greenland-smb': 'Gronlannin pintamassatase - DMI Polar Portal · EI PARAMETREJA (palauttaa koko sarjan) · LUOTETTAVA',
       '/nao': 'Pohjois-Atlantin oskillaatio - NOAA PSL · ?date=YYYY-MM-DD (yksi arvo) tai ?date=...&days=N (aikasarja) · LUOTETTAVA, mutta hidas suurilla days-arvoilla (koko 1948-tiedosto haetaan joka kerta)',
       '/compare/nao-sla': '(VANHENTUNUT, sailytetty taaksepain-yhteensopivuuden vuoksi - kayta /compare?series_a=sla&series_b=nao)',
-      '/compare': 'YLEINEN kahden aikasarjan vertailumoottori - ?series_a=X&series_b=Y&date=YYYY-MM-DD&days=N&lag=N&smooth=N (vrk, liukuva keskiarvo ennen korrelaatiota - mekanistinen validointi: erottaa korkea- ja matalataajuisen ilmion) · saatavilla: sla, nao, sst, smb (vain nyk. sulamiskausi), gmb (GEUS kokonaismassatase 1986-), rapid_moc, rapid_umo, rapid_gs, rapid_ek (RAPID vain 2004-04-07...2024-03-22, ei live) · palauttaa Pearson r, Spearman rho, effective N (autokorrelaatiokorjattu), lag-spektri, automaattinen tulkinta',
+      '/compare': 'YLEINEN kahden aikasarjan vertailumoottori - ?series_a=X&series_b=Y&date=YYYY-MM-DD&days=N&lag=N&smooth=N&monthly=1 (kuukausittainen naytteenotto - vain sla/sst, valttaa ERDDAP:n pitka-aikavali-ongelman noutamalla yhden paivan/kk koko monivuotisen aikavalin sijaan; kaikki ERDDAP-kutsut valimuistissa Cloudflaren Cache API:lla) · saatavilla: sla, nao, sst, smb (vain nyk. sulamiskausi), gmb (GEUS kokonaismassatase 1986-), rapid_moc, rapid_umo, rapid_gs, rapid_ek (RAPID vain 2004-04-07...2024-03-22, ei live) · palauttaa Pearson r, Spearman rho, effective N (autokorrelaatiokorjattu), lag-spektri, automaattinen tulkinta',
     },
     ei_viela_toteutettu: {
       rapid_data: 'Itse moc_transports-datatiedoston tarkka URL/formaatti ei viela varmistettu',
@@ -747,23 +747,99 @@ function splitDateRangeIntoChunks(startStr, endStr, chunkDays = 350) {
   return chunks;
 }
 
+// LISATTY 2026-07-31, kayttajan oma ehdotus: kuukausittainen naytteenotto
+// (yksi paiva/kk) koko monivuotisen aikavalin sijaan. Vahentaa ERDDAP:lta
+// pyydettyjen pisteiden maaran murto-osaan (~240 vs ~7290 20 vuodelle) -
+// ei enaa yhtaan "pitka aikavali"-kyselya, vain yksittaisia, kevyita
+// yhden-paivan kyselyita. Testattu paikallisesti: 240 kuukautta 20
+// vuodelle, oikea jarjestys, ei duplikaatteja.
+function sampleMonthlyDates(startStr, endStr, dayOfMonth = 15) {
+  const dates = [];
+  const start = new Date(startStr + 'T00:00:00Z');
+  const end = new Date(endStr + 'T00:00:00Z');
+  let year = start.getUTCFullYear();
+  let month = start.getUTCMonth();
+  while (true) {
+    const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+    const day = Math.min(dayOfMonth, daysInMonth);
+    const candidate = new Date(Date.UTC(year, month, day));
+    if (candidate > end) break;
+    if (candidate >= start) dates.push(candidate.toISOString().slice(0, 10));
+    month++;
+    if (month > 11) { month = 0; year++; }
+  }
+  return dates;
+}
+
+// LISATTY 2026-07-31, kayttajan oma ehdotus: Cloudflaren oma Cache API
+// -valimuisti ERDDAP-hauille. Koska historiallinen data (2004-2024) ei
+// koskaan muutu, sama URL voidaan tallentaa pitkaksi aikaa - seuraavat
+// vertailut samalta ajalta eivat enaa tarvitse uutta ERDDAP-kutsua
+// lainkaan, mika seka nopeuttaa etta tekee analyysiputken riippumattomaksi
+// NOAA:n hetkellisista hairioista (kuten juuri havaitusta 502/503-
+// ongelmasta).
+async function cachedFetch(url, ttlSeconds = 2592000) { // 30 vrk oletus
+  const cache = caches.default;
+  const cacheKey = new Request(url);
+  let response = await cache.match(cacheKey);
+  if (response) return response;
+  response = await fetch(url);
+  if (response.ok) {
+    const toCache = new Response(response.body, response);
+    toCache.headers.set('Cache-Control', `public, max-age=${ttlSeconds}`);
+    await cache.put(cacheKey, toCache.clone());
+    return toCache;
+  }
+  return response;
+}
+
 // PAIVITETTY 2026-07-31: alkuperainen versio haki KAIKKI palat
 // rinnakkain (Promise.all) - tama itsessaan aiheutti uuden 502-virheen,
 // koska ERDDAP:n oma dokumentaatio varoittaa etta palvelin voi
 // ylikuormittua jos sita pyydetaan liian monella samanaikaisella
 // kyselylla lyhyessa ajassa, vaikka jokainen yksittainen kysely olisi
 // riittavan pieni. Vaihdettu rajoitettuun rinnakkaisuuteen (3 kerrallaan)
-// - tasapaino nopeuden ja ERDDAP:n kuormituksen valilla.
+// - tasapaino nopeuden ja ERDDAP:n kuormituksen valilla. PAIVITETTY
+// VIELA KERRAN: sama pala epaonnistui johdonmukaisesti myos 3
+// rinnakkaisella - vahennetty taysin perakkaiseksi (BATCH_SIZE=1).
+// LISATTY NYT: cachedFetch jokaiselle palalle - toistuvat kyselyt
+// samalta historialliselta ajalta eivat enaa tarvitse uutta ERDDAP-
+// kutsua.
 async function fetchERDDAPSinglePointInChunks(buildUrl, startStr, endStr) {
   const chunks = splitDateRangeIntoChunks(startStr, endStr, 350);
   const out = new Map();
-  const BATCH_SIZE = 1; // PAIVITETTY 2026-07-31 toisen kerran: 3 ei viela riittanyt, sama pala (2004-03-08...2005-02-20) epaonnistui johdonmukaisesti 502/503:lla kolmella yrityksella - taysin perakkainen haku, hitaampi mutta kohteliain
+  const BATCH_SIZE = 1;
   for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
     const batch = chunks.slice(i, i + BATCH_SIZE);
-    const responses = await Promise.all(batch.map(c => fetch(buildUrl(c.start, c.end))));
+    const responses = await Promise.all(batch.map(c => cachedFetch(buildUrl(c.start, c.end))));
     for (let j = 0; j < responses.length; j++) {
       const r = responses[j];
       if (!r.ok) throw new Error(`ERDDAP HTTP ${r.status} (pala ${batch[j].start}...${batch[j].end})`);
+      const csv = await r.text();
+      csv.trim().split('\n').slice(2).forEach(l => {
+        const [time, , , v] = l.split(',');
+        const val = parseFloat(v);
+        if (!Number.isNaN(val)) out.set(time.slice(0, 10), val);
+      });
+    }
+  }
+  return out;
+}
+
+// LISATTY 2026-07-31: kuukausittainen versio - hakee YHDEN paivan per
+// kuukausi yksittaisena, kevyena ERDDAP-kyselyna (ei aikavalia lainkaan),
+// valimuistilla. Valttaa "pitka aikavali"-502-ongelman kokonaan koska
+// yksikaan yksittainen kysely ei koskaan pyyda enempaa kuin 1 paivan.
+async function fetchERDDAPMonthlySamples(buildUrl, startStr, endStr) {
+  const dates = sampleMonthlyDates(startStr, endStr, 15);
+  const out = new Map();
+  const BATCH_SIZE = 3; // yksittaiset paivat ovat paljon kevyempia kuin aikavalit, voidaan sallia hieman enemman rinnakkaisuutta
+  for (let i = 0; i < dates.length; i += BATCH_SIZE) {
+    const batch = dates.slice(i, i + BATCH_SIZE);
+    const responses = await Promise.all(batch.map(d => cachedFetch(buildUrl(d, d))));
+    for (let j = 0; j < responses.length; j++) {
+      const r = responses[j];
+      if (!r.ok) continue; // yksittaisen kuukauden puuttuminen ei kaadu koko hakua
       const csv = await r.text();
       csv.trim().split('\n').slice(2).forEach(l => {
         const [time, , , v] = l.split(',');
@@ -779,11 +855,13 @@ async function fetchSLASeries(startStr, endStr, params) {
   const lat = params.get('lat') || '26.5';
   const lonWest = params.get('lonWest') || '-75';
   const lonEast = params.get('lonEast') || '-15';
+  const monthly = params.get('monthly') === '1';
+  const fetcher = monthly ? fetchERDDAPMonthlySamples : fetchERDDAPSinglePointInChunks;
   const [westMap, eastMap] = await Promise.all([
-    fetchERDDAPSinglePointInChunks(
+    fetcher(
       (s, e) => `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${s}T00:00:00Z):(${e}T00:00:00Z)][(${lat})][(${lonWest})]`,
       startStr, endStr),
-    fetchERDDAPSinglePointInChunks(
+    fetcher(
       (s, e) => `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${s}T00:00:00Z):(${e}T00:00:00Z)][(${lat})][(${lonEast})]`,
       startStr, endStr),
   ]);
@@ -810,7 +888,9 @@ async function fetchNAOSeries(startStr, endStr) {
 async function fetchSSTSeries(startStr, endStr, params) {
   const lat = params.get('sstLat') || '60';
   const lon = params.get('sstLon') || '-30';
-  return fetchERDDAPSinglePointInChunks(
+  const monthly = params.get('monthly') === '1';
+  const fetcher = monthly ? fetchERDDAPMonthlySamples : fetchERDDAPSinglePointInChunks;
+  return fetcher(
     (s, e) => `https://coastwatch.noaa.gov/erddap/griddap/noaacrwsstanomalyDaily.csv?sea_surface_temperature_anomaly[(${s}T00:00:00Z):(${e}T00:00:00Z)][(${lat})][(${lon})]`,
     startStr, endStr);
 }
