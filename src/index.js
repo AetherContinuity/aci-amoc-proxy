@@ -720,24 +720,64 @@ async function handleCompareNAOSLA(url) {
 // Vaihe 4: RAPID mukaan kun sen aikasarja on julkaistu proxyssa
 
 // ── Sarjatoimittajat: kukin palauttaa Map<paivamaara, arvo> ──
+// LISATTY 2026-07-31: ERDDAP hylkaa pitkat yhden pisteen aikasarjakyselyt
+// "Proxy Error" (502) -virheella - ERDDAP:n oma dokumentaatio vahvistaa
+// taman tunnetuksi rajoitteeksi ("Requests for a long time range (>30
+// time points)... often appear as Proxy Errors") ja suosittelee
+// ratkaisuksi useampaa pienempaa kyselya. Havaittu kayttajan omassa
+// testissa: 7289 vrk:n SST-kysely (koko RAPID-aika 2004-2024) antoi
+// 502:n, kun taas 365 vrk toimi.
+//
+// Pilkotaan pyydetty aikavali ~350 vrk:n paloihin, haetaan rinnakkain
+// (Promise.all), yhdistetaan tulokset. Testattu paikallisesti: 7290
+// paivaa (2004-04-07...2024-03-22) jakautuu 21 palaan ilman aukkoja
+// tai paallekkaisyyksia.
+function splitDateRangeIntoChunks(startStr, endStr, chunkDays = 350) {
+  const chunks = [];
+  let cursor = new Date(startStr + 'T00:00:00Z');
+  const end = new Date(endStr + 'T00:00:00Z');
+  while (cursor <= end) {
+    const chunkEnd = new Date(Math.min(cursor.getTime() + (chunkDays - 1) * 86400000, end.getTime()));
+    chunks.push({
+      start: cursor.toISOString().slice(0, 10),
+      end: chunkEnd.toISOString().slice(0, 10),
+    });
+    cursor = new Date(chunkEnd.getTime() + 86400000);
+  }
+  return chunks;
+}
+
+async function fetchERDDAPSinglePointInChunks(buildUrl, startStr, endStr) {
+  const chunks = splitDateRangeIntoChunks(startStr, endStr, 350);
+  const responses = await Promise.all(chunks.map(c => fetch(buildUrl(c.start, c.end))));
+  const out = new Map();
+  for (let i = 0; i < responses.length; i++) {
+    const r = responses[i];
+    if (!r.ok) throw new Error(`ERDDAP HTTP ${r.status} (pala ${chunks[i].start}...${chunks[i].end})`);
+    const csv = await r.text();
+    csv.trim().split('\n').slice(2).forEach(l => {
+      const [time, , , v] = l.split(',');
+      const val = parseFloat(v);
+      if (!Number.isNaN(val)) out.set(time.slice(0, 10), val);
+    });
+  }
+  return out;
+}
+
 async function fetchSLASeries(startStr, endStr, params) {
   const lat = params.get('lat') || '26.5';
   const lonWest = params.get('lonWest') || '-75';
   const lonEast = params.get('lonEast') || '-15';
-  const urlWest = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${startStr}T00:00:00Z):(${endStr}T00:00:00Z)][(${lat})][(${lonWest})]`;
-  const urlEast = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${startStr}T00:00:00Z):(${endStr}T00:00:00Z)][(${lat})][(${lonEast})]`;
-  const [rWest, rEast] = await Promise.all([fetch(urlWest), fetch(urlEast)]);
-  if (!rWest.ok) throw new Error(`sla-lansipiste ERDDAP HTTP ${rWest.status}`);
-  if (!rEast.ok) throw new Error(`sla-itapiste ERDDAP HTTP ${rEast.status}`);
-  const parseRows = (csv) => csv.trim().split('\n').slice(2).map(l => {
-    const [time, , , v] = l.split(',');
-    return { date: time.slice(0, 10), v: parseFloat(v) };
-  }).filter(r => !Number.isNaN(r.v));
-  const westRows = parseRows(await rWest.text());
-  const eastRows = parseRows(await rEast.text());
-  const westByDate = new Map(westRows.map(r => [r.date, r.v]));
+  const [westMap, eastMap] = await Promise.all([
+    fetchERDDAPSinglePointInChunks(
+      (s, e) => `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${s}T00:00:00Z):(${e}T00:00:00Z)][(${lat})][(${lonWest})]`,
+      startStr, endStr),
+    fetchERDDAPSinglePointInChunks(
+      (s, e) => `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${s}T00:00:00Z):(${e}T00:00:00Z)][(${lat})][(${lonEast})]`,
+      startStr, endStr),
+  ]);
   const out = new Map();
-  eastRows.forEach(r => { if (westByDate.has(r.date)) out.set(r.date, r.v - westByDate.get(r.date)); });
+  eastMap.forEach((v, d) => { if (westMap.has(d)) out.set(d, v - westMap.get(d)); });
   return out;
 }
 
@@ -759,17 +799,9 @@ async function fetchNAOSeries(startStr, endStr) {
 async function fetchSSTSeries(startStr, endStr, params) {
   const lat = params.get('sstLat') || '60';
   const lon = params.get('sstLon') || '-30';
-  const urlSST = `https://coastwatch.noaa.gov/erddap/griddap/noaacrwsstanomalyDaily.csv?sea_surface_temperature_anomaly[(${startStr}T00:00:00Z):(${endStr}T00:00:00Z)][(${lat})][(${lon})]`;
-  const r = await fetch(urlSST);
-  if (!r.ok) throw new Error(`sst ERDDAP HTTP ${r.status}`);
-  const csv = await r.text();
-  const out = new Map();
-  csv.trim().split('\n').slice(2).forEach(l => {
-    const [time, , , v] = l.split(',');
-    const val = parseFloat(v);
-    if (!Number.isNaN(val)) out.set(time.slice(0, 10), val);
-  });
-  return out;
+  return fetchERDDAPSinglePointInChunks(
+    (s, e) => `https://coastwatch.noaa.gov/erddap/griddap/noaacrwsstanomalyDaily.csv?sea_surface_temperature_anomaly[(${s}T00:00:00Z):(${e}T00:00:00Z)][(${lat})][(${lon})]`,
+    startStr, endStr);
 }
 
 async function fetchSMBSeries(startStr, endStr) {
