@@ -38,6 +38,7 @@ async function handleStatus() {
       '/sst-anomaly': 'Meriveden lampotila-anomalia - NOAA ERDDAP (OISST) · ?lat=...&lon=...&date=YYYY-MM-DD · LUOTETTAVA',
       '/rapid-info': 'RAPID-AMOC-projektin README (viite/metatiedot, ei viela itse data-arvoja) · EI PARAMETREJA',
       '/greenland-smb': 'Gronlannin pintamassatase - DMI Polar Portal · EI PARAMETREJA (palauttaa koko sarjan) · LUOTETTAVA',
+      '/nao': 'Pohjois-Atlantin oskillaatio - NOAA PSL · ?date=YYYY-MM-DD (yksi arvo) tai ?date=...&days=N (aikasarja) · LUOTETTAVA, mutta hidas suurilla days-arvoilla (koko 1948-tiedosto haetaan joka kerta)',
     },
     ei_viela_toteutettu: {
       rapid_data: 'Itse moc_transports-datatiedoston tarkka URL/formaatti ei viela varmistettu',
@@ -398,6 +399,71 @@ async function handleGreenlandSMB() {
   }
 }
 
+// ── /nao — Pohjois-Atlantin oskillaatio, NOAA PSL ──
+// LISATTY 2026-07-30, kayttajan oma kysymys ("ovatko muut havainneet
+// korrelaatiota lampenemisen/ilmakehan muutoksen kanssa?") johti
+// kirjallisuushakuun (Zhao 2014, Roach 2022, Polo 2014) joka vahvisti
+// suoran yhteyden: itä-lansi-gradientin (UMO-proksi) vuosienvalinen
+// vaihtelu on TUULEN AJAMAA ja korreloi NAO:n kanssa. Taysin avoin,
+// ei kirjautumista - vahvistettu web_fetch:illa. Paivittainen data
+// 1948-nykyhetki, EOF-pohjainen (500mb-korkeuskentat, NCEP/NCAR R1).
+// HUOM: koko tiedosto (~30000+ riviä) haetaan ja suodatetaan joka
+// kutsulla - ei sisaanrakennettua paivamaarasuodatusta palvelimella
+// (toisin kuin ERDDAP). Voi olla hidas suurilla days-arvoilla.
+async function handleNAO(url) {
+  const date = url.searchParams.get('date') || new Date(Date.now() - 3*24*3600*1000).toISOString().slice(0, 10);
+  const days = url.searchParams.get('days') ? parseInt(url.searchParams.get('days'), 10) : null;
+
+  const naoUrl = 'https://downloads.psl.noaa.gov/Public/map/teleconnections/nao.reanalysis.t10trunc.1948-present.txt';
+
+  try {
+    const r = await fetch(naoUrl);
+    if (!r.ok) {
+      throw new Error(`PSL HTTP ${r.status}`);
+    }
+    const text = await r.text();
+    const lines = text.split('\n');
+    const dataLines = lines
+      .map(l => l.trim())
+      .filter(l => /^\d{4}\s+\d{1,2}\s+\d{1,2}\s+-?\d+\.?\d*$/.test(l));
+    const parsed = dataLines.map(l => {
+      const parts = l.split(/\s+/);
+      const y = parts[0], m = parts[1].padStart(2, '0'), d = parts[2].padStart(2, '0');
+      return { date: `${y}-${m}-${d}`, nao: parseFloat(parts[3]) };
+    });
+
+    if (days) {
+      const endD = new Date(date + 'T00:00:00Z');
+      const startD = new Date(endD.getTime() - days * 24 * 3600 * 1000);
+      const filtered = parsed.filter(p => {
+        const pd = new Date(p.date + 'T00:00:00Z');
+        return pd >= startD && pd <= endD;
+      });
+      const values = filtered.map(p => p.nao);
+      const mean = values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
+      return json({
+        bem_e_tyylinen_komponentti: 'AMOC — Pohjois-Atlantin oskillaatio (NAO), aikasarja',
+        lahde: 'NOAA PSL (downloads.psl.noaa.gov), EOF-pohjainen, NCEP/NCAR R1',
+        kysely: { date, days, pisteita: filtered.length },
+        keskiarvo_nao: mean !== null ? Number(mean.toFixed(2)) : null,
+        koko_sarja: filtered,
+        huom: 'Kirjallisuus (Zhao 2014, Roach 2022) vahvistaa: AMOC:n vuosienvalinen vaihtelu 26.5N:lla on tuulen ajamaa ja korreloi NAO:n kanssa. Vertaa tata /sla-gradient-mean-reitin tuloksiin samalta ajalta.',
+      });
+    }
+
+    const latest = parsed.find(p => p.date === date) || parsed[parsed.length - 1];
+    return json({
+      bem_e_tyylinen_komponentti: 'AMOC — Pohjois-Atlantin oskillaatio (NAO)',
+      lahde: 'NOAA PSL (downloads.psl.noaa.gov), EOF-pohjainen, NCEP/NCAR R1',
+      kysely: { date },
+      loydetty: latest,
+      huom: 'Kirjallisuus (Zhao 2014, Roach 2022) vahvistaa: AMOC:n vuosienvalinen vaihtelu 26.5N:lla on tuulen ajamaa ja korreloi NAO:n kanssa. Kayta &days=N palauttaaksesi aikasarjan vertailua varten.',
+    });
+  } catch (e) {
+    return json({ error: e.message, step: 'nao', nao_url: naoUrl }, 502);
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -424,6 +490,8 @@ export default {
         return await handleRapidInfo();
       } else if (path === '/greenland-smb') {
         return await handleGreenlandSMB();
+      } else if (path === '/nao') {
+        return await handleNAO(url);
       }
       return json({ error: `Unknown route: ${path}` }, 404);
     } catch (e) {
