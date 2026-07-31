@@ -40,7 +40,7 @@ async function handleStatus() {
       '/greenland-smb': 'Gronlannin pintamassatase - DMI Polar Portal · EI PARAMETREJA (palauttaa koko sarjan) · LUOTETTAVA',
       '/nao': 'Pohjois-Atlantin oskillaatio - NOAA PSL · ?date=YYYY-MM-DD (yksi arvo) tai ?date=...&days=N (aikasarja) · LUOTETTAVA, mutta hidas suurilla days-arvoilla (koko 1948-tiedosto haetaan joka kerta)',
       '/compare/nao-sla': '(VANHENTUNUT, sailytetty taaksepain-yhteensopivuuden vuoksi - kayta /compare?series_a=sla&series_b=nao)',
-      '/compare': 'YLEINEN kahden aikasarjan vertailumoottori - ?series_a=X&series_b=Y&date=YYYY-MM-DD&days=N&lag=N · saatavilla: sla, nao, sst, smb (rapid ei viela) · palauttaa Pearson r, Spearman rho, effective N (autokorrelaatiokorjattu), lag-spektri, automaattinen tulkinta',
+      '/compare': 'YLEINEN kahden aikasarjan vertailumoottori - ?series_a=X&series_b=Y&date=YYYY-MM-DD&days=N&lag=N · saatavilla: sla, nao, sst, smb, rapid_moc, rapid_umo, rapid_gs, rapid_ek (RAPID vain 2004-04-07...2024-03-22, ei live) · palauttaa Pearson r, Spearman rho, effective N (autokorrelaatiokorjattu), lag-spektri, automaattinen tulkinta',
     },
     ei_viela_toteutettu: {
       rapid_data: 'Itse moc_transports-datatiedoston tarkka URL/formaatti ei viela varmistettu',
@@ -743,15 +743,35 @@ async function fetchSMBSeries(startStr, endStr) {
   return out;
 }
 
-async function fetchRAPIDSeries() {
-  // VAIHE 4, EI VIELA TOTEUTETTU: RAPID:n oma moc_transports.nc on
-  // olemassa (kayttajan lataama, kts. amoc-instrument-plan.md) mutta
-  // ei viela julkaistu taman proxyn omana, live-haettavana reittina -
-  // NetCDF-parsinta ei onnistu suoraan Cloudflare Workerin fetch()+
-  // text()-mallilla (binaarimuoto). Vaatisi joko: (a) esikasitellyn
-  // JSON/CSV-muunnoksen tarjoamisen staattisena tiedostona proxyn
-  // rinnalla, tai (b) erillisen, kertaluontoisen muunnostyokalun.
-  throw new Error('RAPID-sarja ei viela saatavilla taman moottorin kautta - ks. amoc-instrument-plan.md "Vaihe 4"');
+// VAIHE 4 TOTEUTETTU 2026-07-31: RAPID:n oma moc_transports.nc
+// (kayttajan lataama BODC:lta, ks. amoc-instrument-plan.md) muunnettiin
+// paikallisesti Python/netCDF4-kirjastolla kompaktiksi paivittaiseksi
+// JSON:iksi (7290 paivaa, 2004-04-07...2024-03-22, paivakeskiarvot 12h-
+// resoluutiosta) ja julkaistiin staattisena tiedostona aethercontinuity.
+// org:iin - Cloudflare Worker EI voi parsia alkuperaista NetCDF/HDF5-
+// binaarimuotoa suoraan, mutta voi hakea taman jo-esikasitellyn JSON:in
+// tavallisella fetch()+json()-kutsulla.
+//
+// NELJA KOMPONENTTIA rekisteroity ERILLISINA sarjoina (rapid_moc,
+// rapid_umo, rapid_gs, rapid_ek) koska /compare-moottori odottaa yhta
+// arvoa per paiva per sarja, ei moniulotteista objektia. rapid_umo on
+// erityisen kiinnostava - se on TASMALLEEN se suure jota oma karkea
+// SLA-gradienttimme yritti approksimoida (ks. aiempi suora validointi-
+// testi, r=0.339 lag+10:lla, RAAKALLA N:lla laskettuna ennen Neff-
+// korjausta - talla /compare-moottorilla voi nyt toistaa saman testin
+// Neff-korjattuna).
+async function fetchRAPIDComponentSeries(startStr, endStr, component) {
+  const url = 'https://aethercontinuity.org/tools/rapid_daily.json';
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`rapid_daily.json HTTP ${r.status}`);
+  const data = await r.json();
+  const out = new Map();
+  for (const [date, vals] of Object.entries(data)) {
+    if (date >= startStr && date <= endStr && vals[component] !== null && vals[component] !== undefined) {
+      out.set(date, vals[component]);
+    }
+  }
+  return out;
 }
 
 const SERIES_PROVIDERS = {
@@ -759,7 +779,10 @@ const SERIES_PROVIDERS = {
   nao: (s, e, p) => fetchNAOSeries(s, e),
   sst: fetchSSTSeries,
   smb: (s, e) => fetchSMBSeries(s, e),
-  rapid: fetchRAPIDSeries,
+  rapid_moc: (s, e) => fetchRAPIDComponentSeries(s, e, 'moc'),
+  rapid_umo: (s, e) => fetchRAPIDComponentSeries(s, e, 'umo'),
+  rapid_gs: (s, e) => fetchRAPIDComponentSeries(s, e, 'gs'),
+  rapid_ek: (s, e) => fetchRAPIDComponentSeries(s, e, 'ek'),
 };
 
 // LISATTY 2026-07-31, kayttajan oma ehdotus: metadata jokaiselle
@@ -770,8 +793,12 @@ const SERIES_METADATA = {
   nao: { source: 'NOAA CPC (paivittainen normalisoitu, station-based)', units: 'index (normalisoitu)' },
   sst: { source: 'NOAA ERDDAP (noaacrwsstanomalyDaily)', units: 'degree_C (anomalia)' },
   smb: { source: 'DMI Polar Portal (HARMONIE-AROME)', units: 'Gt/vrk (pintamassatase)' },
-  rapid: { source: 'EI VIELA SAATAVILLA - ks. amoc-instrument-plan.md Vaihe 4', units: 'Sv' },
+  rapid_moc: { source: 'RAPID v2024.1a (esikasitelty, 2004-04-07...2024-03-22, ei live)', units: 'Sv (kokonaiskuljetus)' },
+  rapid_umo: { source: 'RAPID v2024.1a (esikasitelty, 2004-04-07...2024-03-22, ei live)', units: 'Sv (ylakeskiokeaanin kuljetus)' },
+  rapid_gs: { source: 'RAPID v2024.1a (esikasitelty, 2004-04-07...2024-03-22, ei live)', units: 'Sv (Florida-salmi/Golfvirta)' },
+  rapid_ek: { source: 'RAPID v2024.1a (esikasitelty, 2004-04-07...2024-03-22, ei live)', units: 'Sv (Ekman-kuljetus)' },
 };
+
 
 // ── Tilastofunktiot: Spearman + effective N (autokorrelaatiokorjattu) ──
 function ranks(arr) {
@@ -948,7 +975,7 @@ async function handleCompare(url) {
         `p-arvo laskettu EFFECTIVE N:lla (${neff.toFixed(0)}), ei raa'alla N:lla (${lag0.xs.length}) - molemmat sarjat autokorreloituneita (lag-1: ${r1x}/${r1y}), tavallinen p-arvo olisi liian optimistinen`,
         'Spearman rho tunnistaa monotonisen yhteyden vaikka Pearson (lineaarinen) olisi heikko - vertaa molempia',
         'lag>0 tarkoittaa: series_b edeltaa series_a:ta',
-        `Saatavilla olevat sarjat: ${Object.keys(SERIES_PROVIDERS).join(', ')} (rapid ei viela toiminnassa, ks. amoc-instrument-plan.md)`,
+        `Saatavilla olevat sarjat: ${Object.keys(SERIES_PROVIDERS).join(', ')} - HUOM: rapid_* -sarjat ulottuvat vain 2004-04-07...2024-03-22 (ei live), muut sarjat voivat siis olla paallekkain vain osittain jos endDate on tuo ajanjakso ohi`,
       ],
     });
   } catch (e) {
