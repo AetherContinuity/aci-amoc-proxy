@@ -753,7 +753,15 @@ function splitDateRangeIntoChunks(startStr, endStr, chunkDays = 350) {
 // ei enaa yhtaan "pitka aikavali"-kyselya, vain yksittaisia, kevyita
 // yhden-paivan kyselyita. Testattu paikallisesti: 240 kuukautta 20
 // vuodelle, oikea jarjestys, ei duplikaatteja.
-function sampleMonthlyDates(startStr, endStr, dayOfMonth = 15) {
+// PAIVITETTY 2026-07-31: lisatty monthStep-parametri kayttajan omasta
+// pyynnosta vahentaa naytteenottotiheytta. Syy: 240 kuukautta ylitti
+// Cloudflare Workerin ILMAISEN TASON 50 alipyynnon rajan per kutsu
+// (havaittu suoraan: "Too many subrequests by single Worker invocation").
+// Oletus monthStep=6 (puolivuosittain) antaa ~40 nayteta 20 vuodelle -
+// turvamarginaali 50:n rajaan, jattaen tilaa myos RAPID:n omalle
+// yhdelle JSON-haulle samassa kutsussa. Testattu paikallisesti: 20v/6kk
+// -> 40 nayteta, tasaiset 6kk:n valit.
+function sampleMonthlyDates(startStr, endStr, dayOfMonth = 15, monthStep = 1) {
   const dates = [];
   const start = new Date(startStr + 'T00:00:00Z');
   const end = new Date(endStr + 'T00:00:00Z');
@@ -765,8 +773,8 @@ function sampleMonthlyDates(startStr, endStr, dayOfMonth = 15) {
     const candidate = new Date(Date.UTC(year, month, day));
     if (candidate > end) break;
     if (candidate >= start) dates.push(candidate.toISOString().slice(0, 10));
-    month++;
-    if (month > 11) { month = 0; year++; }
+    month += monthStep;
+    while (month > 11) { month -= 12; year++; }
   }
   return dates;
 }
@@ -830,8 +838,8 @@ async function fetchERDDAPSinglePointInChunks(buildUrl, startStr, endStr) {
 // kuukausi yksittaisena, kevyena ERDDAP-kyselyna (ei aikavalia lainkaan),
 // valimuistilla. Valttaa "pitka aikavali"-502-ongelman kokonaan koska
 // yksikaan yksittainen kysely ei koskaan pyyda enempaa kuin 1 paivan.
-async function fetchERDDAPMonthlySamples(buildUrl, startStr, endStr) {
-  const dates = sampleMonthlyDates(startStr, endStr, 15);
+async function fetchERDDAPMonthlySamples(buildUrl, startStr, endStr, monthStep) {
+  const dates = sampleMonthlyDates(startStr, endStr, 15, monthStep);
   const out = new Map();
   const BATCH_SIZE = 3; // yksittaiset paivat ovat paljon kevyempia kuin aikavalit, voidaan sallia hieman enemman rinnakkaisuutta
   for (let i = 0; i < dates.length; i += BATCH_SIZE) {
@@ -851,12 +859,26 @@ async function fetchERDDAPMonthlySamples(buildUrl, startStr, endStr) {
   return out;
 }
 
+// PAIVITETTY 2026-07-31, kayttajan oma paatos ("Vahennetaan"): 'monthly'-
+// parametri tulkitaan nyt NUMEROKSI (kuukausivali), ei vain '1':ksi/
+// binaariseksi lipuksi. Cloudflare Workerin ILMAISEN TASON 50 alipyynnon
+// raja per kutsu havaittiin suoraan ("Too many subrequests"). SLA
+// tarvitsee HARVEMMAN oletusvalin koska se hakee KAKSI pistetta
+// (lansi+ita) - kaksinkertainen alipyyntomaara samalla naytemaaralla.
+// Oletukset: SLA=12kk (~20 nayteta x2 pistetta = ~40 alipyyntoa),
+// SST=6kk (~40 nayteta x1 piste = ~40 alipyyntoa) - molemmat
+// turvamarginaalilla 50:n rajaan, jattaen tilaa RAPID:n omalle
+// yhdelle JSON-haulle samassa kutsussa.
 async function fetchSLASeries(startStr, endStr, params) {
   const lat = params.get('lat') || '26.5';
   const lonWest = params.get('lonWest') || '-75';
   const lonEast = params.get('lonEast') || '-15';
-  const monthly = params.get('monthly') === '1';
-  const fetcher = monthly ? fetchERDDAPMonthlySamples : fetchERDDAPSinglePointInChunks;
+  const monthlyParam = params.get('monthly');
+  const monthly = monthlyParam !== null;
+  const monthStep = monthlyParam && monthlyParam !== '1' ? parseInt(monthlyParam, 10) : 12;
+  const fetcher = monthly
+    ? (buildUrl, s, e) => fetchERDDAPMonthlySamples(buildUrl, s, e, monthStep)
+    : fetchERDDAPSinglePointInChunks;
   const [westMap, eastMap] = await Promise.all([
     fetcher(
       (s, e) => `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${s}T00:00:00Z):(${e}T00:00:00Z)][(${lat})][(${lonWest})]`,
@@ -888,11 +910,15 @@ async function fetchNAOSeries(startStr, endStr) {
 async function fetchSSTSeries(startStr, endStr, params) {
   const lat = params.get('sstLat') || '60';
   const lon = params.get('sstLon') || '-30';
-  const monthly = params.get('monthly') === '1';
-  const fetcher = monthly ? fetchERDDAPMonthlySamples : fetchERDDAPSinglePointInChunks;
-  return fetcher(
+  const monthlyParam = params.get('monthly');
+  const monthly = monthlyParam !== null;
+  const monthStep = monthlyParam && monthlyParam !== '1' ? parseInt(monthlyParam, 10) : 6;
+  if (!monthly) return fetchERDDAPSinglePointInChunks(
     (s, e) => `https://coastwatch.noaa.gov/erddap/griddap/noaacrwsstanomalyDaily.csv?sea_surface_temperature_anomaly[(${s}T00:00:00Z):(${e}T00:00:00Z)][(${lat})][(${lon})]`,
     startStr, endStr);
+  return fetchERDDAPMonthlySamples(
+    (s, e) => `https://coastwatch.noaa.gov/erddap/griddap/noaacrwsstanomalyDaily.csv?sea_surface_temperature_anomaly[(${s}T00:00:00Z):(${e}T00:00:00Z)][(${lat})][(${lon})]`,
+    startStr, endStr, monthStep);
 }
 
 async function fetchSMBSeries(startStr, endStr) {
