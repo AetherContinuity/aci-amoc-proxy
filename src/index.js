@@ -137,7 +137,14 @@ async function handleSLAGradientMean(url) {
   const lonWest = url.searchParams.get('lonWest') || '-75';
   const lonEast = url.searchParams.get('lonEast') || '-15';
   const days = parseInt(url.searchParams.get('days') || '30', 10);
-  const endDate = url.searchParams.get('endDate') || new Date().toISOString().slice(0, 10);
+  // KORJATTU 2026-07-30: alkuperainen oletus (tama paiva) aiheutti
+  // ERDDAP HTTP 404 -virheen, koska nain nain-reaaliaikaisella
+  // datasetilla on ~2 vrk viive (havaittu: data ulottui vain
+  // 2026-07-29 asti kun kysyttiin 2026-07-31 asti). Sama viive jo
+  // huomioitu AMOC-monitor.html:n omassa SLA-kortissa (-3 vrk) - lisatty
+  // sama oletus tanne, jotta oletusarvoinen kutsu ei koskaan
+  // epaonnistu ilman etta kayttaja itse antaa endDate-parametrin.
+  const endDate = url.searchParams.get('endDate') || new Date(Date.now() - 3*24*3600*1000).toISOString().slice(0, 10);
 
   const end = new Date(endDate + 'T00:00:00Z');
   const start = new Date(end.getTime() - days * 24 * 3600 * 1000);
