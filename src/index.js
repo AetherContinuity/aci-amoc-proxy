@@ -522,8 +522,6 @@ async function handleCompareNAOSLA(url) {
   const endDate = url.searchParams.get('date') || url.searchParams.get('endDate') || new Date(Date.now() - 3*24*3600*1000).toISOString().slice(0, 10);
 
   const end = new Date(endDate + 'T00:00:00Z');
-  // Haetaan hieman ylimaarainen puskuri (maxLag paivaa) molempiin suuntiin
-  // jotta viivekorrelaatio voidaan laskea koko pyydetylle days-ikkunalle
   const start = new Date(end.getTime() - (days + maxLag) * 24 * 3600 * 1000);
   const fetchEnd = new Date(end.getTime() + maxLag * 24 * 3600 * 1000);
   const startStr = start.toISOString().slice(0, 10);
@@ -531,13 +529,19 @@ async function handleCompareNAOSLA(url) {
 
   const urlWest = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${startStr}T00:00:00Z):(${fetchEndStr}T00:00:00Z)][(${lat})][(${lonWest})]`;
   const urlEast = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${startStr}T00:00:00Z):(${fetchEndStr}T00:00:00Z)][(${lat})][(${lonEast})]`;
-  const naoUrl = 'https://downloads.psl.noaa.gov/Public/map/teleconnections/nao.reanalysis.t10trunc.1948-present.txt';
+  // VAIHDETTU 2026-07-31, kayttajan oma ehdotus: NOAA CPC:n paivittainen,
+  // normalisoitu NAO-indeksi (station-based) on ajantasaisempi kuin
+  // aiempi PSL-lahde (joka jai ~4.5kk jalkeen). HUOM: arvot ovat ERI
+  // SKAALASSA kuin aiempi PSL-versio (normalisoitu ~-2..+2 vs. raaka
+  // EOF-lataus ~-400..+400) - ei vaikuta Pearson r:aan (skaalariippumaton)
+  // mutta nao-arvojen suuruusluokka nayttaa erilaiselta.
+  const naoUrl = 'https://ftp.cpc.ncep.noaa.gov/cwlinks/norm.daily.nao.index.b500101.current.ascii';
 
   try {
     const [rWest, rEast, rNAO] = await Promise.all([fetch(urlWest), fetch(urlEast), fetch(naoUrl)]);
     if (!rWest.ok) throw new Error(`Lansipiste ERDDAP HTTP ${rWest.status}`);
     if (!rEast.ok) throw new Error(`Itapiste ERDDAP HTTP ${rEast.status}`);
-    if (!rNAO.ok) throw new Error(`NAO HTTP ${rNAO.status}`);
+    if (!rNAO.ok) throw new Error(`NAO (CPC) HTTP ${rNAO.status}`);
 
     const parseRows = (csv) => {
       const lines = csv.trim().split('\n').slice(2);
@@ -565,13 +569,11 @@ async function handleCompareNAOSLA(url) {
       naoByDate.set(dateStr, parseFloat(parts[3]));
     });
 
-    // Jarjestetty paivamaaralista jonka yli lag-siirtoja lasketaan
     const allDates = [...gradientByDate.keys()].filter(d => d >= startStr && d <= endDate).sort();
     const gradSeries = allDates.map(d => gradientByDate.get(d));
     const naoAvailable = allDates.filter(d => naoByDate.has(d));
 
     function seriesAtLag(lag) {
-      // lag>0: NAO(t) vs gradientti(t+lag) - NAO EDELTAA gradienttia
       const xs = [], ys = [];
       for (let i = 0; i < allDates.length; i++) {
         const targetIdx = i + lag;
@@ -603,31 +605,54 @@ async function handleCompareNAOSLA(url) {
     }
 
     const naoLastDate = [...naoByDate.keys()].sort().pop();
+    const p0 = pValueFromR(r0, lag0.xs.length);
+    const pBest = pValueFromR(bestR, bestN);
+
+    // Kayttajan oma tulkintaohje dashboardia varten (kynnysarvot
+    // annettu suoraan kayttajan viestissa 2026-07-31)
+    let interpretation;
+    if (Math.abs(bestR) < 0.3 || pBest > 0.05) {
+      interpretation = 'SLA-signaali ei korreloi NAO:n kanssa - vaihtelu ei selity tunnetulla meteorologisella pakotteella. VARO: tama ei vahvista AMOC-tulkintaa.';
+    } else if (Math.abs(bestR) > 0.4 && pBest < 0.01 && bestLag > 5) {
+      interpretation = `SLA seuraa NAO:ta ${bestLag} vrk viiveella (r = ${bestR.toFixed(3)}). Tama viittaa Rossby-aaltomekanismiin, ei suoraan AMOC:n muutokseen.`;
+    } else {
+      interpretation = `Kohtalainen tulos (r_best=${bestR.toFixed(3)}, lag=${bestLag}, p=${pBest.toFixed(4)}) - ei tayta kummankaan ariarvon (|r|<0.3 tai |r|>0.4&p<0.01&lag>5) kriteereja selvasti.`;
+    }
 
     return json({
       bem_e_tyylinen_komponentti: 'AMOC — ita-lansi-gradientin ja NAO:n viivekorrelaatio',
-      lahde: 'NOAA CoastWatch ERDDAP (gradientti) + NOAA PSL (NAO)',
+      lahde: 'NOAA CoastWatch ERDDAP (gradientti) + NOAA CPC paivittainen normalisoitu NAO (station-based)',
       kysely: { lat, lonWest, lonEast, date: endDate, days, maxLag },
       series: {
-        sla_points: allDates.length,
-        nao_points: naoAvailable.length,
-        matched_points_lag0: lag0.xs.length,
+        sla_observations: allDates.length,
+        nao_observations: naoAvailable.length,
+        matched_points: lag0.xs.length,
+        date_range: [allDates[0], allDates[allDates.length - 1]],
       },
       statistics: {
-        pearson_r_lag0: Number(r0.toFixed(4)),
-        p_value_lag0: pValueFromR(r0, lag0.xs.length),
-        r_squared_lag0: Number((r0*r0).toFixed(4)),
+        pearson_r: Number(r0.toFixed(4)),
+        r_squared: Number((r0*r0).toFixed(4)),
+        p_value: p0,
+        lag_0: 0,
         lag_best: bestLag,
-        r_best: Number(bestR.toFixed(4)),
-        p_value_best: pValueFromR(bestR, bestN),
-        n_best: bestN,
+        lag_best_r: Number(bestR.toFixed(4)),
+        lag_best_p: pBest,
       },
-      lag_scan: lagScan,
+      lag_spectrum: {
+        min_lag: -maxLag,
+        max_lag: maxLag,
+        step: 1,
+        peak_correlation: Number(bestR.toFixed(4)),
+        peak_at_lag: bestLag,
+        full_scan: lagScan,
+      },
+      interpretation,
       notes: [
-        `NAO-data paattyy paivamaaraan ${naoLastDate}`,
-        'lag>0 tarkoittaa: NAO edeltaa gradienttia (NAO(t) verrattuna gradienttiin(t+lag)) - positiivinen paras-lag tukisi tuulipakote-mekanismia',
+        `NAO-data (CPC, paivittainen normalisoitu) paattyy paivamaaraan ${naoLastDate}`,
+        'SLA on laskettu raakana ita-lansi-erona ilman kausivaihtelukorjausta (vuosienvalinen/Rossby-dominanssi loydetty aiemmin, ks. amoc-instrument-plan.md)',
+        'lag>0 tarkoittaa: NAO edeltaa gradienttia - positiivinen paras-lag tukisi tuulipakote-/Rossby-aaltomekanismia',
+        'p<0.05 tarkoittaa tilastollista merkitsevyytta (normaalijakauma-approksimaatio, tarkka kun n>100)',
         'Korrelaatio laskettu VAIN paallekkaisilta paivamaarilta - katso series-kentta ennen tulkintaa',
-        'p-arvo on normaalijakauma-approksimaatio (tarkka kun n>100, kuten tassa) - ei tarkka pieni-n-tapauksissa',
       ],
     });
   } catch (e) {
