@@ -39,7 +39,8 @@ async function handleStatus() {
       '/rapid-info': 'RAPID-AMOC-projektin README (viite/metatiedot, ei viela itse data-arvoja) · EI PARAMETREJA',
       '/greenland-smb': 'Gronlannin pintamassatase - DMI Polar Portal · EI PARAMETREJA (palauttaa koko sarjan) · LUOTETTAVA',
       '/nao': 'Pohjois-Atlantin oskillaatio - NOAA PSL · ?date=YYYY-MM-DD (yksi arvo) tai ?date=...&days=N (aikasarja) · LUOTETTAVA, mutta hidas suurilla days-arvoilla (koko 1948-tiedosto haetaan joka kerta)',
-      '/compare/nao-sla': 'Viivekorrelaatio ita-lansi-gradientin ja NAO:n valilla (lag=-30..+30 vrk) - ?date=YYYY-MM-DD&days=N&maxLag=N · palauttaa lag0:n ja parhaan |r|:n loytaneen viiveen, p-arvot, pistemaarat lapinakyvasti',
+      '/compare/nao-sla': '(VANHENTUNUT, sailytetty taaksepain-yhteensopivuuden vuoksi - kayta /compare?series_a=sla&series_b=nao)',
+      '/compare': 'YLEINEN kahden aikasarjan vertailumoottori - ?series_a=X&series_b=Y&date=YYYY-MM-DD&days=N&lag=N · saatavilla: sla, nao, sst, smb (rapid ei viela) · palauttaa Pearson r, Spearman rho, effective N (autokorrelaatiokorjattu), lag-spektri, automaattinen tulkinta',
     },
     ei_viela_toteutettu: {
       rapid_data: 'Itse moc_transports-datatiedoston tarkka URL/formaatti ei viela varmistettu',
@@ -660,6 +661,259 @@ async function handleCompareNAOSLA(url) {
   }
 }
 
+// ══════════════════════════════════════════════════════════════════
+// YLEINEN KAHDEN AIKASARJAN VERTAILUMOOTTORI
+// ══════════════════════════════════════════════════════════════════
+// LISATTY 2026-07-31, kayttajan oma arkkitehtuuriehdotus: sen sijaan
+// etta /compare/nao-sla olisi ainoa, kertakayttoinen vertailu,
+// rakennetaan yleinen moottori jota voi kayttaa myohemmin mihin
+// tahansa sarjapariin (SLA/NAO/RAPID/SST/SMB) ilman uutta koodia.
+//
+// Kehitysjarjestys kayttajan oman ehdotuksen mukaisesti:
+// Vaihe 1 (jo tehty): Pearson + lag +-30 vrk + yhteiset paivamaarat
+// Vaihe 2 (tama paivitys): Spearman + effective N (Neff)
+// Vaihe 3: taysi CCF-kayra (jo osittain: lag_spectrum.full_scan)
+// Vaihe 4: RAPID mukaan kun sen aikasarja on julkaistu proxyssa
+
+// ── Sarjatoimittajat: kukin palauttaa Map<paivamaara, arvo> ──
+async function fetchSLASeries(startStr, endStr, params) {
+  const lat = params.get('lat') || '26.5';
+  const lonWest = params.get('lonWest') || '-75';
+  const lonEast = params.get('lonEast') || '-15';
+  const urlWest = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${startStr}T00:00:00Z):(${endStr}T00:00:00Z)][(${lat})][(${lonWest})]`;
+  const urlEast = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${startStr}T00:00:00Z):(${endStr}T00:00:00Z)][(${lat})][(${lonEast})]`;
+  const [rWest, rEast] = await Promise.all([fetch(urlWest), fetch(urlEast)]);
+  if (!rWest.ok) throw new Error(`sla-lansipiste ERDDAP HTTP ${rWest.status}`);
+  if (!rEast.ok) throw new Error(`sla-itapiste ERDDAP HTTP ${rEast.status}`);
+  const parseRows = (csv) => csv.trim().split('\n').slice(2).map(l => {
+    const [time, , , v] = l.split(',');
+    return { date: time.slice(0, 10), v: parseFloat(v) };
+  }).filter(r => !Number.isNaN(r.v));
+  const westRows = parseRows(await rWest.text());
+  const eastRows = parseRows(await rEast.text());
+  const westByDate = new Map(westRows.map(r => [r.date, r.v]));
+  const out = new Map();
+  eastRows.forEach(r => { if (westByDate.has(r.date)) out.set(r.date, r.v - westByDate.get(r.date)); });
+  return out;
+}
+
+async function fetchNAOSeries(startStr, endStr) {
+  const naoUrl = 'https://ftp.cpc.ncep.noaa.gov/cwlinks/norm.daily.nao.index.b500101.current.ascii';
+  const r = await fetch(naoUrl);
+  if (!r.ok) throw new Error(`nao (CPC) HTTP ${r.status}`);
+  const text = await r.text();
+  const lines = text.split('\n').map(l => l.trim()).filter(l => /^\d{4}\s+\d{1,2}\s+\d{1,2}\s+-?\d+\.?\d*$/.test(l));
+  const out = new Map();
+  lines.forEach(l => {
+    const p = l.split(/\s+/);
+    const d = `${p[0]}-${p[1].padStart(2,'0')}-${p[2].padStart(2,'0')}`;
+    if (d >= startStr && d <= endStr) out.set(d, parseFloat(p[3]));
+  });
+  return out;
+}
+
+async function fetchSSTSeries(startStr, endStr, params) {
+  const lat = params.get('sstLat') || '60';
+  const lon = params.get('sstLon') || '-30';
+  const urlSST = `https://coastwatch.noaa.gov/erddap/griddap/noaacrwsstanomalyDaily.csv?sea_surface_temperature_anomaly[(${startStr}T00:00:00Z):(${endStr}T00:00:00Z)][(${lat})][(${lon})]`;
+  const r = await fetch(urlSST);
+  if (!r.ok) throw new Error(`sst ERDDAP HTTP ${r.status}`);
+  const csv = await r.text();
+  const out = new Map();
+  csv.trim().split('\n').slice(2).forEach(l => {
+    const [time, , , v] = l.split(',');
+    const val = parseFloat(v);
+    if (!Number.isNaN(val)) out.set(time.slice(0, 10), val);
+  });
+  return out;
+}
+
+async function fetchSMBSeries(startStr, endStr) {
+  const smbUrl = 'https://download.dmi.dk/Research_Projects/polarportal/PP_GSMB/GSMB.txt';
+  const r = await fetch(smbUrl);
+  if (!r.ok) throw new Error(`smb (DMI) HTTP ${r.status}`);
+  const text = await r.text();
+  const lines = text.split('\n').map(l => l.trim()).filter(l => /^\d{8}\s+-?\d+\.?\d*\s+-?\d+\.?\d*$/.test(l));
+  const out = new Map();
+  lines.forEach(l => {
+    const [dateStr, smb] = l.split(/\s+/);
+    const d = `${dateStr.slice(0,4)}-${dateStr.slice(4,6)}-${dateStr.slice(6,8)}`;
+    if (d >= startStr && d <= endStr) out.set(d, parseFloat(smb));
+  });
+  return out;
+}
+
+async function fetchRAPIDSeries() {
+  // VAIHE 4, EI VIELA TOTEUTETTU: RAPID:n oma moc_transports.nc on
+  // olemassa (kayttajan lataama, kts. amoc-instrument-plan.md) mutta
+  // ei viela julkaistu taman proxyn omana, live-haettavana reittina -
+  // NetCDF-parsinta ei onnistu suoraan Cloudflare Workerin fetch()+
+  // text()-mallilla (binaarimuoto). Vaatisi joko: (a) esikasitellyn
+  // JSON/CSV-muunnoksen tarjoamisen staattisena tiedostona proxyn
+  // rinnalla, tai (b) erillisen, kertaluontoisen muunnostyokalun.
+  throw new Error('RAPID-sarja ei viela saatavilla taman moottorin kautta - ks. amoc-instrument-plan.md "Vaihe 4"');
+}
+
+const SERIES_PROVIDERS = {
+  sla: fetchSLASeries,
+  nao: (s, e, p) => fetchNAOSeries(s, e),
+  sst: fetchSSTSeries,
+  smb: (s, e) => fetchSMBSeries(s, e),
+  rapid: fetchRAPIDSeries,
+};
+
+// ── Tilastofunktiot: Spearman + effective N (autokorrelaatiokorjattu) ──
+function ranks(arr) {
+  const idx = arr.map((v, i) => i).sort((a, b) => arr[a] - arr[b]);
+  const r = new Array(arr.length);
+  let i = 0;
+  while (i < idx.length) {
+    let j = i;
+    while (j + 1 < idx.length && arr[idx[j+1]] === arr[idx[i]]) j++;
+    const avgRank = (i + j) / 2 + 1;
+    for (let k = i; k <= j; k++) r[idx[k]] = avgRank;
+    i = j + 1;
+  }
+  return r;
+}
+function spearmanRho(xs, ys) {
+  return pearsonR(ranks(xs), ranks(ys));
+}
+// Effective sample size autokorreloiduille aikasarjoille (Bretherton
+// ym. 1999 -tyylinen approksimaatio): Neff = N*(1-r1x*r1y)/(1+r1x*r1y).
+// Molemmat NAO ja SLA ovat ajallisesti autokorreloituneita (vahvistettu
+// aiemmin: Rossby-aallot etenevat hitaasti) - tavallinen Pearsonin
+// p-arvo N:lla olisi liian optimistinen (nayttaisi merkitsevammalta
+// kuin todellisuudessa on).
+function lag1Autocorr(series) {
+  if (series.length < 3) return 0;
+  return pearsonR(series.slice(0, -1), series.slice(1));
+}
+function effectiveN(xs, ys) {
+  const n = xs.length;
+  const r1x = lag1Autocorr(xs), r1y = lag1Autocorr(ys);
+  const raw = n * (1 - r1x * r1y) / (1 + r1x * r1y);
+  return { neff: Math.max(2, Math.min(n, raw)), r1x: Number(r1x.toFixed(3)), r1y: Number(r1y.toFixed(3)) };
+}
+
+async function handleCompare(url) {
+  const seriesA = url.searchParams.get('series_a');
+  const seriesB = url.searchParams.get('series_b');
+  const days = parseInt(url.searchParams.get('days') || '365', 10);
+  const maxLag = parseInt(url.searchParams.get('lag') || url.searchParams.get('maxLag') || '30', 10);
+  const endDate = url.searchParams.get('date') || new Date(Date.now() - 3*24*3600*1000).toISOString().slice(0, 10);
+
+  if (!seriesA || !seriesB) {
+    return json({ error: 'series_a ja series_b ovat pakollisia parametreja', saatavilla: Object.keys(SERIES_PROVIDERS) }, 400);
+  }
+  if (!SERIES_PROVIDERS[seriesA] || !SERIES_PROVIDERS[seriesB]) {
+    return json({ error: `Tuntematon sarja: ${!SERIES_PROVIDERS[seriesA] ? seriesA : seriesB}`, saatavilla: Object.keys(SERIES_PROVIDERS) }, 400);
+  }
+
+  const end = new Date(endDate + 'T00:00:00Z');
+  const start = new Date(end.getTime() - (days + maxLag) * 24 * 3600 * 1000);
+  const fetchEndDate = new Date(end.getTime() + maxLag * 24 * 3600 * 1000);
+  const startStr = start.toISOString().slice(0, 10);
+  const fetchEndStr = fetchEndDate.toISOString().slice(0, 10) > endDate ? endDate : fetchEndDate.toISOString().slice(0, 10);
+
+  try {
+    const [mapA, mapB] = await Promise.all([
+      SERIES_PROVIDERS[seriesA](startStr, fetchEndStr, url.searchParams),
+      SERIES_PROVIDERS[seriesB](startStr, fetchEndStr, url.searchParams),
+    ]);
+
+    const allDates = [...mapA.keys()].filter(d => d >= startStr && d <= endDate).sort();
+    const seriesAVals = allDates.map(d => mapA.get(d));
+    const bAvailable = allDates.filter(d => mapB.has(d));
+
+    function seriesAtLag(lag) {
+      const xs = [], ys = [];
+      for (let i = 0; i < allDates.length; i++) {
+        const targetIdx = i + lag;
+        if (targetIdx < 0 || targetIdx >= allDates.length) continue;
+        const dateB = allDates[i];
+        if (!mapB.has(dateB)) continue;
+        xs.push(seriesAVals[targetIdx]);
+        ys.push(mapB.get(dateB));
+      }
+      return { xs, ys };
+    }
+
+    const lag0 = seriesAtLag(0);
+    if (lag0.xs.length < 10) {
+      throw new Error(`Liian vahan paallekkaisia paivamaaria (${lag0.xs.length}) - tarkista etta molempien sarjojen data ulottuu pyydetylle valille`);
+    }
+    const r0 = pearsonR(lag0.xs, lag0.ys);
+    const rho0 = spearmanRho(lag0.xs, lag0.ys);
+    const { neff, r1x, r1y } = effectiveN(lag0.xs, lag0.ys);
+
+    let bestLag = 0, bestR = r0, bestN = lag0.xs.length;
+    const lagScan = [];
+    for (let lag = -maxLag; lag <= maxLag; lag++) {
+      const { xs, ys } = seriesAtLag(lag);
+      if (xs.length < 10) continue;
+      const r = pearsonR(xs, ys);
+      lagScan.push({ lag, r: Number(r.toFixed(4)), n: xs.length });
+      if (Math.abs(r) > Math.abs(bestR)) { bestR = r; bestLag = lag; bestN = xs.length; }
+    }
+
+    // p-arvo lasketaan Neff:lla, ei raa'alla N:lla - kayttajan oma
+    // huomio: molemmat sarjat autokorreloituneita, tavallinen N
+    // yliarvioisi tilastollisen merkitsevyyden
+    const pValueNeff = pValueFromR(r0, neff);
+    const pValueBestNeff = pValueFromR(bestR, neff); // sama neff-arvio koko ikkunalle, karkea approksimaatio eri lag:eille
+
+    let interpretation;
+    if (Math.abs(bestR) < 0.3 || pValueBestNeff > 0.05) {
+      interpretation = `${seriesA}-signaali ei korreloi ${seriesB}:n kanssa (Neff-korjattu p-arvo huomioitu) - vaihtelu ei selity tunnetulla mekanismilla talla otoksella.`;
+    } else if (Math.abs(bestR) > 0.4 && pValueBestNeff < 0.01 && bestLag > 5) {
+      interpretation = `${seriesA} seuraa ${seriesB}:ta ${bestLag} vrk viiveella (r=${bestR.toFixed(3)}, Neff=${neff.toFixed(0)}) - viittaa hitaasti etenevaan fysikaaliseen mekanismiin (esim. Rossby-aalto), ei valittomaan yhteyteen.`;
+    } else {
+      interpretation = `Kohtalainen tulos (r_best=${bestR.toFixed(3)}, lag=${bestLag}, Neff=${neff.toFixed(0)}, p=${pValueBestNeff.toFixed(4)}) - ei tayta selkeasti kumpaakaan ariarvon kategoriaa.`;
+    }
+
+    return json({
+      bem_e_tyylinen_komponentti: `AMOC — yleinen sarjavertailu: ${seriesA} vs ${seriesB}`,
+      lahde: 'ACI yleinen kahden aikasarjan vertailumoottori',
+      kysely: { series_a: seriesA, series_b: seriesB, date: endDate, days, maxLag },
+      series: {
+        [`${seriesA}_observations`]: allDates.length,
+        [`${seriesB}_observations`]: bAvailable.length,
+        matched_points: lag0.xs.length,
+        date_range: [allDates[0], allDates[allDates.length - 1]],
+      },
+      statistics: {
+        pearson_r: Number(r0.toFixed(4)),
+        spearman_rho: Number(rho0.toFixed(4)),
+        r_squared: Number((r0*r0).toFixed(4)),
+        effective_n: Number(neff.toFixed(1)),
+        raw_n: lag0.xs.length,
+        lag1_autocorr_a: r1x,
+        lag1_autocorr_b: r1y,
+        p_value: pValueNeff,
+        lag_0: 0,
+        lag_best: bestLag,
+        lag_best_r: Number(bestR.toFixed(4)),
+        lag_best_p: pValueBestNeff,
+      },
+      lag_spectrum: {
+        min_lag: -maxLag, max_lag: maxLag, step: 1,
+        peak_correlation: Number(bestR.toFixed(4)), peak_at_lag: bestLag,
+        full_scan: lagScan,
+      },
+      interpretation,
+      notes: [
+        `p-arvo laskettu EFFECTIVE N:lla (${neff.toFixed(0)}), ei raa'alla N:lla (${lag0.xs.length}) - molemmat sarjat autokorreloituneita (lag-1: ${r1x}/${r1y}), tavallinen p-arvo olisi liian optimistinen`,
+        'Spearman rho tunnistaa monotonisen yhteyden vaikka Pearson (lineaarinen) olisi heikko - vertaa molempia',
+        'lag>0 tarkoittaa: series_b edeltaa series_a:ta',
+        `Saatavilla olevat sarjat: ${Object.keys(SERIES_PROVIDERS).join(', ')} (rapid ei viela toiminnassa, ks. amoc-instrument-plan.md)`,
+      ],
+    });
+  } catch (e) {
+    return json({ error: e.message, step: 'compare', series_a: seriesA, series_b: seriesB }, 502);
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -690,6 +944,8 @@ export default {
         return await handleNAO(url);
       } else if (path === '/compare/nao-sla') {
         return await handleCompareNAOSLA(url);
+      } else if (path === '/compare') {
+        return await handleCompare(url);
       }
       return json({ error: `Unknown route: ${path}` }, 404);
     } catch (e) {
