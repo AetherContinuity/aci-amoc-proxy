@@ -33,6 +33,7 @@ async function handleStatus() {
       '/status': 'Taman sivun tila',
       '/sla': 'Merenpinnan korkeuspoikkeama, yksi piste (Sentinel-6-tyyppinen data) - NOAA ERDDAP · ?lat=...&lon=...&date=YYYY-MM-DD · LUOTETTAVA MUTTA EI GEOSTROFINEN (yksi piste ei tuota gradienttia)',
       '/sla-gradient': 'Ita-lansi-korkeusero 26.5N (kokeellinen approksimaatio RAPID:n menetelmasta) - ?lat=...&lonWest=...&lonEast=...&date=YYYY-MM-DD',
+      '/sla-gradient-mean': '30 vrk (oletus) liukuva keskiarvo ita-lansi-korkeuserosta, tasoittaa mesoskaalakohinaa - ?lat=...&lonWest=...&lonEast=...&endDate=YYYY-MM-DD&days=N',
       '/sst-anomaly': 'Meriveden lampotila-anomalia - NOAA ERDDAP (OISST) · ?lat=...&lon=...&date=YYYY-MM-DD · LUOTETTAVA',
       '/rapid-info': 'RAPID-AMOC-projektin README (viite/metatiedot, ei viela itse data-arvoja) · EI PARAMETREJA',
       '/greenland-smb': 'Gronlannin pintamassatase - DMI Polar Portal · EI PARAMETREJA (palauttaa koko sarjan) · LUOTETTAVA',
@@ -119,6 +120,74 @@ async function handleSLAGradient(url) {
     });
   } catch (e) {
     return json({ error: e.message, step: 'sla-gradient' }, 502);
+  }
+}
+
+// ── /sla-gradient-mean — 30 vrk keskiarvo ita-lansi-korkeuserosta ──
+// LISATTY 2026-07-30, jatkoa kayttajan ja hanen harrastelijaystavansa
+// kvantitatiiviselle analyysille: yhden paivan gradientti (-0.048 m)
+// vastaisi ~0.8 m/s nopeutta jos koko vesipatsas liikkuisi - epa-
+// realistisen korkea verrattuna RAPID:n omaan ~0.1-0.3 m/s -tasoon,
+// mika vahvisti etta yksittainen paiva on mesoskaalakohinan dominoima.
+// Tama reitti hakee 30 vrk aikasarjan MOLEMMILLE pisteille samalla,
+// jo vahvistetusti toimivalla ERDDAP-lahteella (ei uutta CMEMS-avainta
+// tarvita), laskee paivittaisen gradientin ja sen 30 vrk keskiarvon.
+async function handleSLAGradientMean(url) {
+  const lat = url.searchParams.get('lat') || '26.5';
+  const lonWest = url.searchParams.get('lonWest') || '-75';
+  const lonEast = url.searchParams.get('lonEast') || '-15';
+  const days = parseInt(url.searchParams.get('days') || '30', 10);
+  const endDate = url.searchParams.get('endDate') || new Date().toISOString().slice(0, 10);
+
+  const end = new Date(endDate + 'T00:00:00Z');
+  const start = new Date(end.getTime() - days * 24 * 3600 * 1000);
+  const startStr = start.toISOString().slice(0, 10);
+
+  const urlWest = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${startStr}T00:00:00Z):(${endDate}T00:00:00Z)][(${lat})][(${lonWest})]`;
+  const urlEast = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${startStr}T00:00:00Z):(${endDate}T00:00:00Z)][(${lat})][(${lonEast})]`;
+
+  try {
+    const [rWest, rEast] = await Promise.all([fetch(urlWest), fetch(urlEast)]);
+    if (!rWest.ok) throw new Error(`Lansipiste ERDDAP HTTP ${rWest.status}: ${await rWest.text()}`);
+    if (!rEast.ok) throw new Error(`Itapiste ERDDAP HTTP ${rEast.status}: ${await rEast.text()}`);
+
+    const parseRows = (csv) => {
+      const lines = csv.trim().split('\n').slice(2); // ohita otsikko + yksikkorivi
+      return lines.map(l => {
+        const [time, , , sla] = l.split(',');
+        return { date: time.slice(0, 10), sla: parseFloat(sla) };
+      }).filter(r => !Number.isNaN(r.sla));
+    };
+    const westRows = parseRows(await rWest.text());
+    const eastRows = parseRows(await rEast.text());
+
+    // Yhdistetaan paivamaaran mukaan (Map-pohjainen haku, ei oleteta
+    // samaa jarjestysta/pituutta molemmissa sarjoissa)
+    const westByDate = new Map(westRows.map(r => [r.date, r.sla]));
+    const dailyGradients = eastRows
+      .filter(r => westByDate.has(r.date))
+      .map(r => ({ date: r.date, gradient: r.sla - westByDate.get(r.date) }));
+
+    if (!dailyGradients.length) {
+      throw new Error('Ei paallekkaisia paivamaaria lansi- ja itapisteen valilla');
+    }
+
+    const meanGradient = dailyGradients.reduce((a, b) => a + b.gradient, 0) / dailyGradients.length;
+    const values = dailyGradients.map(d => d.gradient);
+    const stdev = Math.sqrt(values.reduce((a, b) => a + (b - meanGradient) ** 2, 0) / values.length);
+
+    return json({
+      bem_e_tyylinen_komponentti: 'AMOC — ita-lansi-korkeuseron 30 vrk liukuva keskiarvo',
+      lahde: 'NOAA CoastWatch ERDDAP, sama dataset kuin /sla-gradient',
+      kysely: { lat, lonWest, lonEast, startDate: startStr, endDate, pyydettyPaivia: days },
+      pisteita_yhdistetty: dailyGradients.length,
+      keskiarvo_gradientti_m: Number(meanGradient.toFixed(5)),
+      keskihajonta_m: Number(stdev.toFixed(5)),
+      paivittaiset_arvot: dailyGradients,
+      huom: 'Keskiarvo tasoittaa mesoskaalapyorteiden kohinaa yksittaisesta paivasta, mutta EI VIELA korreloi suoraan RAPID:n kanssa - RAPID sisaltaa myos Florida-salmen virtauksen (jota SLA ei nae) ja pohjan tiheysrakenteen. Tama on askel oikeaan suuntaan, ei validointi.',
+    });
+  } catch (e) {
+    return json({ error: e.message, step: 'sla-gradient-mean' }, 502);
   }
 }
 
@@ -281,6 +350,8 @@ export default {
         return await handleSLA(url);
       } else if (path === '/sla-gradient') {
         return await handleSLAGradient(url);
+      } else if (path === '/sla-gradient-mean') {
+        return await handleSLAGradientMean(url);
       } else if (path === '/sst-anomaly') {
         return await handleSSTAnomaly(url);
       } else if (path === '/rapid-info') {
