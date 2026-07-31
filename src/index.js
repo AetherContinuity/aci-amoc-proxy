@@ -514,6 +514,50 @@ function pValueFromR(r, n) {
   return Math.min(1, oneSided * 2);
 }
 
+// Benjamini-Hochberg FDR-korjaus (1995) monivertailulle.
+// LISATTY 2026-07-31, kayttajan oma ehdotus - koska /compare testaa
+// -30..+30 vrk (61 viivetta) samanaikaisesti, "paras loydetty r" on
+// altis satunnaiselle ylikorostumiselle (jos testataan 61 kertaa,
+// jokin niista nayttaa "hyvalta" pelkasta sattumasta viiden prosentin
+// merkitsevyystasolla n. 3 kertaa 61:sta odotusarvoisesti). BH-menetelma
+// kontrolloi vaarien loytojen odotettua osuutta (false discovery rate)
+// kaikkien testien joukossa, ei vain yksittaista p-arvoa.
+//
+// HUOM tarkeasta JS-ansasta: jos mikaan ei ole merkitseva, maxRank=0 ja
+// significantIndices palautetaan tyhjana taulukkona SUORAAN (ei
+// array.slice(0,-1):lla, joka JS:ssa tarkoittaisi "kaikki paitsi
+// viimeinen" - EI tyhjaa taulukkoa). Tama loytyi ja korjattiin
+// paikallisella testauksella ennen julkaisua.
+function benjaminiHochberg(pValues, alpha = 0.05) {
+  const m = pValues.length;
+  const indexed = pValues.map((p, i) => ({ p, origIndex: i }));
+  indexed.sort((a, b) => a.p - b.p);
+
+  let maxSignificantRank = 0;
+  for (let i = 0; i < m; i++) {
+    const rank = i + 1;
+    const threshold = (rank / m) * alpha;
+    if (indexed[i].p <= threshold) {
+      maxSignificantRank = rank;
+    }
+  }
+
+  const qValues = new Array(m);
+  let runningMin = 1;
+  for (let i = m - 1; i >= 0; i--) {
+    const rank = i + 1;
+    const q = Math.min(runningMin, indexed[i].p * m / rank);
+    runningMin = q;
+    qValues[indexed[i].origIndex] = q;
+  }
+
+  const significantIndices = maxSignificantRank > 0
+    ? indexed.slice(0, maxSignificantRank).map(x => x.origIndex)
+    : [];
+
+  return { qValues, significantIndices, maxSignificantRank, alpha };
+}
+
 async function handleCompareNAOSLA(url) {
   const lat = url.searchParams.get('lat') || '26.5';
   const lonWest = url.searchParams.get('lonWest') || '-75';
@@ -918,6 +962,16 @@ async function handleCompare(url) {
       if (Math.abs(r) > Math.abs(bestR)) { bestR = r; bestLag = lag; bestN = xs.length; }
     }
 
+    // BENJAMINI-HOCHBERG FDR-KORJAUS, LISATTY 2026-07-31 (kayttajan
+    // oma ehdotus): lasketaan p-arvo JOKAISELLE testatulle viiveelle
+    // (sama neff-arvio kaikille - karkea mutta johdonmukainen
+    // approksimaatio), sovelletaan BH-menetelma nakemaan selviytyyko
+    // yksikaan viive monivertailukorjauksen jalkeen.
+    const lagPValues = lagScan.map(entry => pValueFromR(entry.r, neff));
+    const bh = benjaminiHochberg(lagPValues, 0.05);
+    const bhSignificantLags = bh.significantIndices.map(idx => lagScan[idx].lag).sort((a,b)=>a-b);
+    lagScan.forEach((entry, idx) => { entry.p_value = lagPValues[idx]; entry.bh_q_value = Number(bh.qValues[idx].toFixed(4)); });
+
     // p-arvo lasketaan Neff:lla, ei raa'alla N:lla - kayttajan oma
     // huomio: molemmat sarjat autokorreloituneita, tavallinen N
     // yliarvioisi tilastollisen merkitsevyyden
@@ -968,9 +1022,19 @@ async function handleCompare(url) {
         peak_correlation: Number(bestR.toFixed(4)), peak_at_lag: bestLag,
         full_scan: lagScan,
       },
+      fdr_correction: {
+        method: 'Benjamini-Hochberg (1995)',
+        alpha: 0.05,
+        n_tests: lagScan.length,
+        n_significant_after_correction: bhSignificantLags.length,
+        significant_lags: bhSignificantLags,
+      },
       interpretation,
       notes: [
-        `Paras lag (${bestLag}) valittu ${lagScan.length} testatusta viiveesta - ei korjattu monivertailulle (esim. Benjamini-Hochberg FDR). Suhtaudu "parhaaseen" lagiin varovasti, tama on tunnistettu, ei viela korjattu rajoite (ks. amoc-instrument-plan.md).`,
+        bhSignificantLags.length > 0
+          ? `BH-korjauksen (FDR, alpha=0.05) jalkeen ${bhSignificantLags.length}/${lagScan.length} viivetta pysyy merkitsevana: ${bhSignificantLags.join(', ')}`
+          : `BH-korjauksen (FDR, alpha=0.05) jalkeen EI YKSIKAAN ${lagScan.length} testatusta viiveesta ole merkitseva - myos "paras loydetty" r saattoi olla vain monivertailun aiheuttamaa satunnaista ylikorostumista.`,
+        `Paras lag (${bestLag}) valittu ${lagScan.length} testatusta viiveesta - katso fdr_correction selvittaaksesi kestaako tama monivertailukorjauksen.`,
         `Effective N laskettu taydella ACF:lla (Pyper & Peterman 1998 -tyylinen, ${acf_lags_used} viivetta huomioitu, ei vain lag-1) - ACF-summa=${acf_sum}`,
         `p-arvo laskettu EFFECTIVE N:lla (${neff.toFixed(0)}), ei raa'alla N:lla (${lag0.xs.length}) - molemmat sarjat autokorreloituneita (lag-1: ${r1x}/${r1y}), tavallinen p-arvo olisi liian optimistinen`,
         'Spearman rho tunnistaa monotonisen yhteyden vaikka Pearson (lineaarinen) olisi heikko - vertaa molempia',
