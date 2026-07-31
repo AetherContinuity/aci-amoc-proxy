@@ -757,7 +757,7 @@ function splitDateRangeIntoChunks(startStr, endStr, chunkDays = 350) {
 async function fetchERDDAPSinglePointInChunks(buildUrl, startStr, endStr) {
   const chunks = splitDateRangeIntoChunks(startStr, endStr, 350);
   const out = new Map();
-  const BATCH_SIZE = 3;
+  const BATCH_SIZE = 1; // PAIVITETTY 2026-07-31 toisen kerran: 3 ei viela riittanyt, sama pala (2004-03-08...2005-02-20) epaonnistui johdonmukaisesti 502/503:lla kolmella yrityksella - taysin perakkainen haku, hitaampi mutta kohteliain
   for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
     const batch = chunks.slice(i, i + BATCH_SIZE);
     const responses = await Promise.all(batch.map(c => fetch(buildUrl(c.start, c.end))));
