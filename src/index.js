@@ -40,7 +40,7 @@ async function handleStatus() {
       '/greenland-smb': 'Gronlannin pintamassatase - DMI Polar Portal · EI PARAMETREJA (palauttaa koko sarjan) · LUOTETTAVA',
       '/nao': 'Pohjois-Atlantin oskillaatio - NOAA PSL · ?date=YYYY-MM-DD (yksi arvo) tai ?date=...&days=N (aikasarja) · LUOTETTAVA, mutta hidas suurilla days-arvoilla (koko 1948-tiedosto haetaan joka kerta)',
       '/compare/nao-sla': '(VANHENTUNUT, sailytetty taaksepain-yhteensopivuuden vuoksi - kayta /compare?series_a=sla&series_b=nao)',
-      '/compare': 'YLEINEN kahden aikasarjan vertailumoottori - ?series_a=X&series_b=Y&date=YYYY-MM-DD&days=N&lag=N · saatavilla: sla, nao, sst, smb (vain nyk. sulamiskausi), gmb (GEUS kokonaismassatase 1986-), rapid_moc, rapid_umo, rapid_gs, rapid_ek (RAPID vain 2004-04-07...2024-03-22, ei live) · palauttaa Pearson r, Spearman rho, effective N (autokorrelaatiokorjattu), lag-spektri, automaattinen tulkinta',
+      '/compare': 'YLEINEN kahden aikasarjan vertailumoottori - ?series_a=X&series_b=Y&date=YYYY-MM-DD&days=N&lag=N&smooth=N (vrk, liukuva keskiarvo ennen korrelaatiota - mekanistinen validointi: erottaa korkea- ja matalataajuisen ilmion) · saatavilla: sla, nao, sst, smb (vain nyk. sulamiskausi), gmb (GEUS kokonaismassatase 1986-), rapid_moc, rapid_umo, rapid_gs, rapid_ek (RAPID vain 2004-04-07...2024-03-22, ei live) · palauttaa Pearson r, Spearman rho, effective N (autokorrelaatiokorjattu), lag-spektri, automaattinen tulkinta',
     },
     ei_viela_toteutettu: {
       rapid_data: 'Itse moc_transports-datatiedoston tarkka URL/formaatti ei viela varmistettu',
@@ -943,11 +943,43 @@ function effectiveN(xs, ys) {
   };
 }
 
+// LISATTY 2026-07-31, kayttajan oma ehdotus (mekanistinen validointi,
+// Vaihe 1 - suodatustestit): jos SST-RAPID_MOC-korrelaatio (r=0.525,
+// lag=-11) katoaa kun molemmat sarjat tasoitetaan liukuvalla
+// keskiarvolla (30/60/90 vrk), kyseessa on korkeataajuinen (saa-
+// asteikon) ilmio, ei hidas valtamerivaste - erottaa kaksi
+// kilpailevaa fysikaalista tulkintaa suoralla testilla.
+//
+// Trailing-ikkuna (nykyinen paiva + edeltavat windowDays-1 paivaa).
+// Vaatii vahintaan puolet ikkunan pituudesta jotta reuna-artefaktit
+// (ikkunan alku/loppu, missa data on vajaata) valtetaan. Testattu
+// paikallisesti: vakioarvo pysyy samana, askelfunktion siirtyma
+// tasoittuu oikein asteittain.
+function applyMovingAverage(dateValueMap, windowDays) {
+  if (!windowDays || windowDays < 2) return dateValueMap;
+  const dates = [...dateValueMap.keys()].sort();
+  const out = new Map();
+  for (let i = 0; i < dates.length; i++) {
+    const windowStart = new Date(dates[i] + 'T00:00:00Z').getTime() - (windowDays - 1) * 86400000;
+    const windowVals = [];
+    for (let j = i; j >= 0; j--) {
+      const dj = new Date(dates[j] + 'T00:00:00Z').getTime();
+      if (dj < windowStart) break;
+      windowVals.push(dateValueMap.get(dates[j]));
+    }
+    if (windowVals.length >= Math.ceil(windowDays / 2)) {
+      out.set(dates[i], windowVals.reduce((a,b)=>a+b,0) / windowVals.length);
+    }
+  }
+  return out;
+}
+
 async function handleCompare(url) {
   const seriesA = url.searchParams.get('series_a');
   const seriesB = url.searchParams.get('series_b');
   const days = parseInt(url.searchParams.get('days') || '365', 10);
   const maxLag = parseInt(url.searchParams.get('lag') || url.searchParams.get('maxLag') || '30', 10);
+  const smooth = parseInt(url.searchParams.get('smooth') || '0', 10); // LISATTY: liukuva keskiarvo (vrk), 0=ei suodatusta
   const endDate = url.searchParams.get('date') || new Date(Date.now() - 3*24*3600*1000).toISOString().slice(0, 10);
 
   if (!seriesA || !seriesB) {
@@ -964,10 +996,15 @@ async function handleCompare(url) {
   const fetchEndStr = fetchEndDate.toISOString().slice(0, 10) > endDate ? endDate : fetchEndDate.toISOString().slice(0, 10);
 
   try {
-    const [mapA, mapB] = await Promise.all([
+    let [mapA, mapB] = await Promise.all([
       SERIES_PROVIDERS[seriesA](startStr, fetchEndStr, url.searchParams),
       SERIES_PROVIDERS[seriesB](startStr, fetchEndStr, url.searchParams),
     ]);
+
+    if (smooth >= 2) {
+      mapA = applyMovingAverage(mapA, smooth);
+      mapB = applyMovingAverage(mapB, smooth);
+    }
 
     const allDates = [...mapA.keys()].filter(d => d >= startStr && d <= endDate).sort();
     const seriesAVals = allDates.map(d => mapA.get(d));
@@ -1032,7 +1069,7 @@ async function handleCompare(url) {
     return json({
       bem_e_tyylinen_komponentti: `AMOC — yleinen sarjavertailu: ${seriesA} vs ${seriesB}`,
       lahde: 'ACI yleinen kahden aikasarjan vertailumoottori',
-      kysely: { series_a: seriesA, series_b: seriesB, date: endDate, days, maxLag },
+      kysely: { series_a: seriesA, series_b: seriesB, date: endDate, days, maxLag, smooth: smooth || null },
       metadata: {
         series_a: { name: seriesA, ...(SERIES_METADATA[seriesA] || {}) },
         series_b: { name: seriesB, ...(SERIES_METADATA[seriesB] || {}) },
