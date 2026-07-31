@@ -747,19 +747,30 @@ function splitDateRangeIntoChunks(startStr, endStr, chunkDays = 350) {
   return chunks;
 }
 
+// PAIVITETTY 2026-07-31: alkuperainen versio haki KAIKKI palat
+// rinnakkain (Promise.all) - tama itsessaan aiheutti uuden 502-virheen,
+// koska ERDDAP:n oma dokumentaatio varoittaa etta palvelin voi
+// ylikuormittua jos sita pyydetaan liian monella samanaikaisella
+// kyselylla lyhyessa ajassa, vaikka jokainen yksittainen kysely olisi
+// riittavan pieni. Vaihdettu rajoitettuun rinnakkaisuuteen (3 kerrallaan)
+// - tasapaino nopeuden ja ERDDAP:n kuormituksen valilla.
 async function fetchERDDAPSinglePointInChunks(buildUrl, startStr, endStr) {
   const chunks = splitDateRangeIntoChunks(startStr, endStr, 350);
-  const responses = await Promise.all(chunks.map(c => fetch(buildUrl(c.start, c.end))));
   const out = new Map();
-  for (let i = 0; i < responses.length; i++) {
-    const r = responses[i];
-    if (!r.ok) throw new Error(`ERDDAP HTTP ${r.status} (pala ${chunks[i].start}...${chunks[i].end})`);
-    const csv = await r.text();
-    csv.trim().split('\n').slice(2).forEach(l => {
-      const [time, , , v] = l.split(',');
-      const val = parseFloat(v);
-      if (!Number.isNaN(val)) out.set(time.slice(0, 10), val);
-    });
+  const BATCH_SIZE = 3;
+  for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+    const batch = chunks.slice(i, i + BATCH_SIZE);
+    const responses = await Promise.all(batch.map(c => fetch(buildUrl(c.start, c.end))));
+    for (let j = 0; j < responses.length; j++) {
+      const r = responses[j];
+      if (!r.ok) throw new Error(`ERDDAP HTTP ${r.status} (pala ${batch[j].start}...${batch[j].end})`);
+      const csv = await r.text();
+      csv.trim().split('\n').slice(2).forEach(l => {
+        const [time, , , v] = l.split(',');
+        const val = parseFloat(v);
+        if (!Number.isNaN(val)) out.set(time.slice(0, 10), val);
+      });
+    }
   }
   return out;
 }
