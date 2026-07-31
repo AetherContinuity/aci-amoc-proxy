@@ -39,7 +39,7 @@ async function handleStatus() {
       '/rapid-info': 'RAPID-AMOC-projektin README (viite/metatiedot, ei viela itse data-arvoja) · EI PARAMETREJA',
       '/greenland-smb': 'Gronlannin pintamassatase - DMI Polar Portal · EI PARAMETREJA (palauttaa koko sarjan) · LUOTETTAVA',
       '/nao': 'Pohjois-Atlantin oskillaatio - NOAA PSL · ?date=YYYY-MM-DD (yksi arvo) tai ?date=...&days=N (aikasarja) · LUOTETTAVA, mutta hidas suurilla days-arvoilla (koko 1948-tiedosto haetaan joka kerta)',
-      '/sla-gradient-nao-correlation': 'Pearson-korrelaatio ita-lansi-gradientin ja NAO:n valilla - ?lat=...&lonWest=...&lonEast=...&endDate=YYYY-MM-DD&days=N · HUOM: NAO-data ~4.5kk viiveella, vain paallekkaiset paivat kaytetaan',
+      '/compare/nao-sla': 'Viivekorrelaatio ita-lansi-gradientin ja NAO:n valilla (lag=-30..+30 vrk) - ?date=YYYY-MM-DD&days=N&maxLag=N · palauttaa lag0:n ja parhaan |r|:n loytaneen viiveen, p-arvot, pistemaarat lapinakyvasti',
     },
     ei_viela_toteutettu: {
       rapid_data: 'Itse moc_transports-datatiedoston tarkka URL/formaatti ei viela varmistettu',
@@ -473,19 +473,64 @@ async function handleNAO(url) {
 // vaikutelmaan. HUOM: NAO-data ei ulotu yhta pitkalle kuin gradientti
 // (havaittu: viimeisin NAO-piste 2026-03-17, ~4.5kk viive) - vain
 // paallekkaiset paivamaarat kaytetaan.
-async function handleSLAGradientNAOCorrelation(url) {
+// ── /compare/nao-sla — Yleinen viivekorrelaatiotyokalu ──
+// LISATTY 2026-07-30, kayttajan oma ehdotus (paransi alkuperaista
+// yhden-Pearson-luvun versiota): AMOC:n vuosienvalinen vaihtelu voi
+// olla NAO:n tuulipakotteen viivastynytta seurausta, ei samanaikaista.
+// Skannaa lag=-30...+30 vrk, palauttaa seka lag=0 etta parhaan |r|:n
+// loytaneen viiveen, molemmille p-arvon (normaalijakauma-approksimaatio,
+// tarkka kun n>200 - t-jakauma ~ normaali suurella vapausasteella).
+// Nayttaa AINA pistemaarat (sla/nao/yhdistetyt) ENNEN korrelaatiota -
+// kayttajan oma periaate: "kayttaja nakee heti ettei korrelaatio
+// perustunut koko vuoden aineistoon."
+//
+// ACI-filosofia (kayttajan oma sanoin): hypoteesia ei oleteta oikeaksi,
+// vaan sille rakennetaan mitattava testi. Jos korrelaatiota ei loydy,
+// sekin on arvokas tulos.
+function pearsonR(xs, ys) {
+  const n = xs.length;
+  const mx = xs.reduce((a,b)=>a+b,0)/n, my = ys.reduce((a,b)=>a+b,0)/n;
+  let cov=0, vx=0, vy=0;
+  for (let i=0;i<n;i++){ const dx=xs[i]-mx, dy=ys[i]-my; cov+=dx*dy; vx+=dx*dx; vy+=dy*dy; }
+  return cov / Math.sqrt(vx*vy);
+}
+// Normaalijakauman kertymafunktion approksimaatio (Abramowitz-Stegun
+// 7.1.26). Kayttokelpoinen p-arvon approksimointiin kun n on suuri
+// (df=n-2>200), jolloin t-jakauma lahestyy normaalijakaumaa. PIENELLA
+// n:lla tama approksimaatio EI ole tarkka - ei kaytetty tassa koska
+// kaikki reitin kayttotapaukset tuottavat n>100.
+function normalCDF(z) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(z));
+  const d = 0.3989423 * Math.exp(-z*z/2);
+  let p = d*t*(0.3193815+t*(-0.3565638+t*(1.781478+t*(-1.821256+t*1.330274))));
+  if (z > 0) p = 1 - p;
+  return p;
+}
+function pValueFromR(r, n) {
+  if (n < 3 || Math.abs(r) >= 1) return null;
+  const t = r * Math.sqrt((n-2)/(1-r*r));
+  const oneSided = 1 - normalCDF(Math.abs(t));
+  return Math.min(1, oneSided * 2);
+}
+
+async function handleCompareNAOSLA(url) {
   const lat = url.searchParams.get('lat') || '26.5';
   const lonWest = url.searchParams.get('lonWest') || '-75';
   const lonEast = url.searchParams.get('lonEast') || '-15';
   const days = parseInt(url.searchParams.get('days') || '365', 10);
-  const endDate = url.searchParams.get('endDate') || new Date(Date.now() - 3*24*3600*1000).toISOString().slice(0, 10);
+  const maxLag = parseInt(url.searchParams.get('maxLag') || '30', 10);
+  const endDate = url.searchParams.get('date') || url.searchParams.get('endDate') || new Date(Date.now() - 3*24*3600*1000).toISOString().slice(0, 10);
 
   const end = new Date(endDate + 'T00:00:00Z');
-  const start = new Date(end.getTime() - days * 24 * 3600 * 1000);
+  // Haetaan hieman ylimaarainen puskuri (maxLag paivaa) molempiin suuntiin
+  // jotta viivekorrelaatio voidaan laskea koko pyydetylle days-ikkunalle
+  const start = new Date(end.getTime() - (days + maxLag) * 24 * 3600 * 1000);
+  const fetchEnd = new Date(end.getTime() + maxLag * 24 * 3600 * 1000);
   const startStr = start.toISOString().slice(0, 10);
+  const fetchEndStr = fetchEnd.toISOString().slice(0, 10) > endDate ? endDate : fetchEnd.toISOString().slice(0, 10);
 
-  const urlWest = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${startStr}T00:00:00Z):(${endDate}T00:00:00Z)][(${lat})][(${lonWest})]`;
-  const urlEast = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${startStr}T00:00:00Z):(${endDate}T00:00:00Z)][(${lat})][(${lonEast})]`;
+  const urlWest = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${startStr}T00:00:00Z):(${fetchEndStr}T00:00:00Z)][(${lat})][(${lonWest})]`;
+  const urlEast = `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${startStr}T00:00:00Z):(${fetchEndStr}T00:00:00Z)][(${lat})][(${lonEast})]`;
   const naoUrl = 'https://downloads.psl.noaa.gov/Public/map/teleconnections/nao.reanalysis.t10trunc.1948-present.txt';
 
   try {
@@ -520,42 +565,73 @@ async function handleSLAGradientNAOCorrelation(url) {
       naoByDate.set(dateStr, parseFloat(parts[3]));
     });
 
-    // Yhdistetaan VAIN paivamaarat joilta molemmat sarjat loytyvat
-    const paired = [];
-    for (const [date, gradient] of gradientByDate) {
-      if (naoByDate.has(date)) {
-        paired.push({ date, gradient, nao: naoByDate.get(date) });
+    // Jarjestetty paivamaaralista jonka yli lag-siirtoja lasketaan
+    const allDates = [...gradientByDate.keys()].filter(d => d >= startStr && d <= endDate).sort();
+    const gradSeries = allDates.map(d => gradientByDate.get(d));
+    const naoAvailable = allDates.filter(d => naoByDate.has(d));
+
+    function seriesAtLag(lag) {
+      // lag>0: NAO(t) vs gradientti(t+lag) - NAO EDELTAA gradienttia
+      const xs = [], ys = [];
+      for (let i = 0; i < allDates.length; i++) {
+        const targetIdx = i + lag;
+        if (targetIdx < 0 || targetIdx >= allDates.length) continue;
+        const naoDate = allDates[i];
+        if (!naoByDate.has(naoDate)) continue;
+        xs.push(gradSeries[targetIdx]);
+        ys.push(naoByDate.get(naoDate));
+      }
+      return { xs, ys };
+    }
+
+    const lag0 = seriesAtLag(0);
+    if (lag0.xs.length < 10) {
+      throw new Error(`Liian vahan paallekkaisia paivamaaria (${lag0.xs.length}) - NAO-data ei todennakoisesti ulotu pyydetylle valille`);
+    }
+    const r0 = pearsonR(lag0.xs, lag0.ys);
+
+    let bestLag = 0, bestR = r0, bestN = lag0.xs.length;
+    const lagScan = [];
+    for (let lag = -maxLag; lag <= maxLag; lag++) {
+      const { xs, ys } = seriesAtLag(lag);
+      if (xs.length < 10) continue;
+      const r = pearsonR(xs, ys);
+      lagScan.push({ lag, r: Number(r.toFixed(4)), n: xs.length });
+      if (Math.abs(r) > Math.abs(bestR)) {
+        bestR = r; bestLag = lag; bestN = xs.length;
       }
     }
-    paired.sort((a, b) => a.date.localeCompare(b.date));
-
-    if (paired.length < 3) {
-      throw new Error(`Liian vahan paallekkaisia paivamaaria (${paired.length}) korrelaation laskentaan - NAO-data ei todennakoisesti ulotu pyydetylle valille`);
-    }
-
-    // Pearsonin korrelaatiokerroin
-    const n = paired.length;
-    const xs = paired.map(p => p.gradient), ys = paired.map(p => p.nao);
-    const mx = xs.reduce((a,b)=>a+b,0)/n, my = ys.reduce((a,b)=>a+b,0)/n;
-    let cov=0, vx=0, vy=0;
-    for (let i=0;i<n;i++){ const dx=xs[i]-mx, dy=ys[i]-my; cov+=dx*dy; vx+=dx*dx; vy+=dy*dy; }
-    const r = cov / Math.sqrt(vx*vy);
 
     const naoLastDate = [...naoByDate.keys()].sort().pop();
 
     return json({
-      bem_e_tyylinen_komponentti: 'AMOC — ita-lansi-gradientin ja NAO:n Pearson-korrelaatio',
+      bem_e_tyylinen_komponentti: 'AMOC — ita-lansi-gradientin ja NAO:n viivekorrelaatio',
       lahde: 'NOAA CoastWatch ERDDAP (gradientti) + NOAA PSL (NAO)',
-      kysely: { lat, lonWest, lonEast, startDate: startStr, endDate, pyydettyPaivia: days },
-      paallekkaisia_paivia: n,
-      pearson_r: Number(r.toFixed(4)),
-      nao_datan_viimeisin_paiva: naoLastDate,
-      huom: r < -0.3 ? 'Kohtalainen/vahva NEGATIIVINEN korrelaatio - odotettu suunta jos NAO kuvaa lantisen reunan lampovuota kaanteisesti gradienttiin' :
-            r > 0.3 ? 'Kohtalainen/vahva POSITIIVINEN korrelaatio' :
-            'Heikko tai olematon korrelaatio (|r|<0.3) - silmamaarainen vaikutelma ei saanut tilastollista tukea talla otoksella',
+      kysely: { lat, lonWest, lonEast, date: endDate, days, maxLag },
+      series: {
+        sla_points: allDates.length,
+        nao_points: naoAvailable.length,
+        matched_points_lag0: lag0.xs.length,
+      },
+      statistics: {
+        pearson_r_lag0: Number(r0.toFixed(4)),
+        p_value_lag0: pValueFromR(r0, lag0.xs.length),
+        r_squared_lag0: Number((r0*r0).toFixed(4)),
+        lag_best: bestLag,
+        r_best: Number(bestR.toFixed(4)),
+        p_value_best: pValueFromR(bestR, bestN),
+        n_best: bestN,
+      },
+      lag_scan: lagScan,
+      notes: [
+        `NAO-data paattyy paivamaaraan ${naoLastDate}`,
+        'lag>0 tarkoittaa: NAO edeltaa gradienttia (NAO(t) verrattuna gradienttiin(t+lag)) - positiivinen paras-lag tukisi tuulipakote-mekanismia',
+        'Korrelaatio laskettu VAIN paallekkaisilta paivamaarilta - katso series-kentta ennen tulkintaa',
+        'p-arvo on normaalijakauma-approksimaatio (tarkka kun n>100, kuten tassa) - ei tarkka pieni-n-tapauksissa',
+      ],
     });
   } catch (e) {
-    return json({ error: e.message, step: 'sla-gradient-nao-correlation' }, 502);
+    return json({ error: e.message, step: 'compare-nao-sla' }, 502);
   }
 }
 
@@ -587,8 +663,8 @@ export default {
         return await handleGreenlandSMB();
       } else if (path === '/nao') {
         return await handleNAO(url);
-      } else if (path === '/sla-gradient-nao-correlation') {
-        return await handleSLAGradientNAOCorrelation(url);
+      } else if (path === '/compare/nao-sla') {
+        return await handleCompareNAOSLA(url);
       }
       return json({ error: `Unknown route: ${path}` }, 404);
     } catch (e) {
