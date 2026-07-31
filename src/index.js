@@ -40,7 +40,7 @@ async function handleStatus() {
       '/greenland-smb': 'Gronlannin pintamassatase - DMI Polar Portal · EI PARAMETREJA (palauttaa koko sarjan) · LUOTETTAVA',
       '/nao': 'Pohjois-Atlantin oskillaatio - NOAA PSL · ?date=YYYY-MM-DD (yksi arvo) tai ?date=...&days=N (aikasarja) · LUOTETTAVA, mutta hidas suurilla days-arvoilla (koko 1948-tiedosto haetaan joka kerta)',
       '/compare/nao-sla': '(VANHENTUNUT, sailytetty taaksepain-yhteensopivuuden vuoksi - kayta /compare?series_a=sla&series_b=nao)',
-      '/compare': 'YLEINEN kahden aikasarjan vertailumoottori - ?series_a=X&series_b=Y&date=YYYY-MM-DD&days=N&lag=N · saatavilla: sla, nao, sst, smb, rapid_moc, rapid_umo, rapid_gs, rapid_ek (RAPID vain 2004-04-07...2024-03-22, ei live) · palauttaa Pearson r, Spearman rho, effective N (autokorrelaatiokorjattu), lag-spektri, automaattinen tulkinta',
+      '/compare': 'YLEINEN kahden aikasarjan vertailumoottori - ?series_a=X&series_b=Y&date=YYYY-MM-DD&days=N&lag=N · saatavilla: sla, nao, sst, smb (vain nyk. sulamiskausi), gmb (GEUS kokonaismassatase 1986-), rapid_moc, rapid_umo, rapid_gs, rapid_ek (RAPID vain 2004-04-07...2024-03-22, ei live) · palauttaa Pearson r, Spearman rho, effective N (autokorrelaatiokorjattu), lag-spektri, automaattinen tulkinta',
     },
     ei_viela_toteutettu: {
       rapid_data: 'Itse moc_transports-datatiedoston tarkka URL/formaatti ei viela varmistettu',
@@ -787,6 +787,46 @@ async function fetchSMBSeries(startStr, endStr) {
   return out;
 }
 
+// LISATTY 2026-07-31, kayttajan pyynnosta korjata SMB-RAPID-vertailun
+// aikaikkunaongelma: DMI:n GSMB.txt kattaa vain nykyisen sulamiskauden
+// (~2025-syyskuusta alkaen), ei ulotu RAPID:n historialliselle ajalle
+// (2004-2024) lainkaan - "0 paallekkaista paivamaaraa" ei siis ollut
+// korjattava kyselyparametri vaan aito, rakenteellinen aikaikkunoiden
+// paallekkaisyyden puute.
+//
+// LOYDETTY PAREMPI, PIDEMPI LAHDE: GEUS/PROMICE-massatase (Mankoff ym.
+// 2021, "1840-nykyhetki"), thredds.geus.dk. Paivittainen, 1986-alkaen -
+// ULOTTUU RAPID:n koko 2004-2024-ajalle. LISAKSI tama on KOKONAIS-
+// massatase (sisaltaa jaatikoiden kalvamisen/discharge), ei vain
+// DMI:n pintamassatase - tasmalleen se suure jota alunperin
+// tavoittelimme (ks. aiempi HEM/BEM-E-keskustelu GRACE:sta).
+//
+// CSV-tiedosto antaa KUMULATIIVISEN tason (MB_cumulative), ei
+// paivittaista nopeutta - lasketaan paivittainen ERO peratkaisten
+// rivien valilla jotta suure on vertailukelpoinen DMI:n SMB-sarjan
+// (Gt/vrk) kanssa. Testattu paikallisesti synteettisella naytteella.
+async function fetchGMBSeries(startStr, endStr) {
+  const gmbUrl = 'https://thredds.geus.dk/thredds/fileServer/MassBalance/MB_cumulative.csv';
+  const r = await fetch(gmbUrl);
+  if (!r.ok) throw new Error(`gmb (GEUS/PROMICE) HTTP ${r.status}`);
+  const text = await r.text();
+  const lines = text.trim().split('\n').slice(1); // ohita otsikkorivi
+  const rows = [];
+  for (const l of lines) {
+    const parts = l.split(',');
+    const date = parts[0];
+    const cum = parseFloat(parts[1]);
+    if (!Number.isNaN(cum)) rows.push({ date, cumulative: cum });
+  }
+  const out = new Map();
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i].date >= startStr && rows[i].date <= endStr) {
+      out.set(rows[i].date, rows[i].cumulative - rows[i-1].cumulative);
+    }
+  }
+  return out;
+}
+
 // VAIHE 4 TOTEUTETTU 2026-07-31: RAPID:n oma moc_transports.nc
 // (kayttajan lataama BODC:lta, ks. amoc-instrument-plan.md) muunnettiin
 // paikallisesti Python/netCDF4-kirjastolla kompaktiksi paivittaiseksi
@@ -823,6 +863,7 @@ const SERIES_PROVIDERS = {
   nao: (s, e, p) => fetchNAOSeries(s, e),
   sst: fetchSSTSeries,
   smb: (s, e) => fetchSMBSeries(s, e),
+  gmb: (s, e) => fetchGMBSeries(s, e),
   rapid_moc: (s, e) => fetchRAPIDComponentSeries(s, e, 'moc'),
   rapid_umo: (s, e) => fetchRAPIDComponentSeries(s, e, 'umo'),
   rapid_gs: (s, e) => fetchRAPIDComponentSeries(s, e, 'gs'),
@@ -836,7 +877,8 @@ const SERIES_METADATA = {
   sla: { source: 'NOAA CoastWatch ERDDAP (noaacwBLENDEDsshDaily)', units: 'm (ita-lansi-ero, 26.5N)' },
   nao: { source: 'NOAA CPC (paivittainen normalisoitu, station-based)', units: 'index (normalisoitu)' },
   sst: { source: 'NOAA ERDDAP (noaacrwsstanomalyDaily)', units: 'degree_C (anomalia)' },
-  smb: { source: 'DMI Polar Portal (HARMONIE-AROME)', units: 'Gt/vrk (pintamassatase)' },
+  smb: { source: 'DMI Polar Portal (HARMONIE-AROME)', units: 'Gt/vrk (pintamassatase, vain nykyinen sulamiskausi)' },
+  gmb: { source: 'GEUS/PROMICE (Mankoff ym. 2021), thredds.geus.dk', units: 'Gt/vrk (kokonaismassatase, 1986-nykyhetki, sisaltaa kalvamisen)' },
   rapid_moc: { source: 'RAPID v2024.1a (esikasitelty, 2004-04-07...2024-03-22, ei live)', units: 'Sv (kokonaiskuljetus)' },
   rapid_umo: { source: 'RAPID v2024.1a (esikasitelty, 2004-04-07...2024-03-22, ei live)', units: 'Sv (ylakeskiokeaanin kuljetus)' },
   rapid_gs: { source: 'RAPID v2024.1a (esikasitelty, 2004-04-07...2024-03-22, ei live)', units: 'Sv (Florida-salmi/Golfvirta)' },
