@@ -1179,7 +1179,7 @@ async function fetchSeriesAtExactDates(seriesName, dates, params) {
 // ei paivaa). Tassa siirto tehdaan KALENTERIPAIVINA hakuvaiheessa, ei
 // jalkikateen indeksipaikkoina.
 async function handleCompareFixedLag(url, seriesA, seriesB, endDate, days, fixedLag) {
-  const monthStep = parseInt(url.searchParams.get('monthly') || '6', 10);
+  const monthStep = parseInt(url.searchParams.get('monthly') || '12', 10); // PAIVITETTY: 6->12 (vuosittain, ~20 nayteta 20v) - 6 (40 nayteta) osui viela alipyyntorajaan
   const end = new Date(endDate + 'T00:00:00Z');
   const start = new Date(end.getTime() - days * 24 * 3600 * 1000);
   const startStr = start.toISOString().slice(0, 10);
