@@ -843,7 +843,11 @@ async function fetchERDDAPAtDates(buildUrl, dates) {
   const BATCH_SIZE = 3;
   for (let i = 0; i < dates.length; i += BATCH_SIZE) {
     const batch = dates.slice(i, i + BATCH_SIZE);
-    const responses = await Promise.all(batch.map(d => cachedFetch(buildUrl(d, d))));
+    // VALIAIKAINEN DIAGNOSTIIKKA 2026-08-01: cachedFetch vaihdettu
+    // plain fetch():ksi eristaaksemme onko Cache API -kaare itse
+    // subrequest-ongelman lahde, vaikka Cloudflaren oma dokumentaatio
+    // sanoo cache.match() ei koskaan laske alipyyntona.
+    const responses = await Promise.all(batch.map(d => fetch(buildUrl(d, d))));
     for (let j = 0; j < responses.length; j++) {
       const r = responses[j];
       if (!r.ok) continue;
