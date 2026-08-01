@@ -1179,13 +1179,31 @@ async function fetchSeriesAtExactDates(seriesName, dates, params) {
 // ei paivaa). Tassa siirto tehdaan KALENTERIPAIVINA hakuvaiheessa, ei
 // jalkikateen indeksipaikkoina.
 async function handleCompareFixedLag(url, seriesA, seriesB, endDate, days, fixedLag) {
-  const monthStep = parseInt(url.searchParams.get('monthly') || '12', 10); // PAIVITETTY: 6->12 (vuosittain, ~20 nayteta 20v) - 6 (40 nayteta) osui viela alipyyntorajaan
+  const monthStep = parseInt(url.searchParams.get('monthly') || '12', 10);
   const end = new Date(endDate + 'T00:00:00Z');
   const start = new Date(end.getTime() - days * 24 * 3600 * 1000);
   const startStr = start.toISOString().slice(0, 10);
 
+  const anchorDates = sampleMonthlyDates(startStr, endDate, 15, monthStep);
+
+  // LISATTY 2026-08-01: dryRun-diagnostiikkatila. Sama subrequest-virhe
+  // toistui vaikka laskettu maara (~21) pitaisi olla selvasti alle
+  // ilmaisen tason 50:n rajan - tama palauttaa TARKAN pistemaaran ilman
+  // yhtaan oikeaa hakua, jotta voidaan varmistaa onko oma laskelma
+  // vaarin vai onko kyse jostain muusta.
+  if (url.searchParams.get('dryRun') === '1') {
+    return json({
+      dry_run: true,
+      anchor_points: anchorDates.length,
+      series_a_is_erddap: !CHEAP_SERIES.has(seriesA),
+      series_b_is_erddap: !CHEAP_SERIES.has(seriesB),
+      arvioitu_alipyyntomaara: (CHEAP_SERIES.has(seriesA) ? 1 : anchorDates.length) + (CHEAP_SERIES.has(seriesB) ? 1 : anchorDates.length),
+      ensimmaiset_5_paivamaaraa: anchorDates.slice(0, 5),
+      viimeiset_3_paivamaaraa: anchorDates.slice(-3),
+    });
+  }
+
   try {
-    const anchorDates = sampleMonthlyDates(startStr, endDate, 15, monthStep);
     // series_b haetaan ankkuripaivina sellaisenaan; series_a haetaan
     // ankkuri+fixedLag -siirrettyina paivina (lag>0 = B edeltaa A:ta,
     // sama etumerkkikonventio kuin paaskannauksessa)
