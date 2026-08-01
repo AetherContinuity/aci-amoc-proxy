@@ -38,6 +38,7 @@ async function handleStatus() {
       '/sst-anomaly': 'Meriveden lampotila-anomalia - NOAA ERDDAP (OISST) · ?lat=...&lon=...&date=YYYY-MM-DD · LUOTETTAVA',
       '/rapid-info': 'RAPID-AMOC-projektin README (viite/metatiedot, ei viela itse data-arvoja) · EI PARAMETREJA',
       '/greenland-smb': 'Gronlannin pintamassatase - DMI Polar Portal · EI PARAMETREJA (palauttaa koko sarjan) · LUOTETTAVA',
+      '/greenland-gmb': 'Gronlannin KOKONAISmassatase (sisaltaa kalvamisen) - GEUS/PROMICE 1986-nykyhetki · EI PARAMETREJA (palauttaa vain tuoreimman arvon) · LUOTETTAVA',
       '/nao': 'Pohjois-Atlantin oskillaatio - NOAA PSL · ?date=YYYY-MM-DD (yksi arvo) tai ?date=...&days=N (aikasarja) · LUOTETTAVA, mutta hidas suurilla days-arvoilla (koko 1948-tiedosto haetaan joka kerta)',
       '/compare/nao-sla': '(VANHENTUNUT, sailytetty taaksepain-yhteensopivuuden vuoksi - kayta /compare?series_a=sla&series_b=nao)',
       '/compare': 'YLEINEN kahden aikasarjan vertailumoottori - ?series_a=X&series_b=Y&date=YYYY-MM-DD&days=N&lag=N&smooth=N&monthly=N (vain sla/sst: kuukausittainen naytteenotto N kk:n valein, esim. monthly=6 puolivuosittain - valttaa ERDDAP:n pitka-aikavali-502-ongelman JA Cloudflaren 50 alipyynnon rajan; oletukset SST=6kk/~40 alipyyntoa, SLA=12kk/~40 alipyyntoa kahdelle pisteelle; kaikki ERDDAP-kutsut valimuistissa Cache API:lla) · saatavilla: sla, nao, sst, smb (vain nyk. sulamiskausi), gmb (GEUS kokonaismassatase 1986-), rapid_moc, rapid_umo, rapid_gs, rapid_ek (RAPID vain 2004-04-07...2024-03-22, ei live) · palauttaa Pearson r, Spearman rho, effective N (autokorrelaatiokorjattu), lag-spektri, automaattinen tulkinta',
@@ -398,6 +399,48 @@ async function handleGreenlandSMB() {
     });
   } catch (e) {
     return json({ error: e.message, step: 'greenland-smb', smb_url: smbUrl }, 502);
+  }
+}
+
+// LISATTY 2026-08-01, kayttajan oma huomio: sivun oma kortti nayttaa
+// vain DMI:n pintamassataseen, vaikka GEUS/PROMICE-kokonaismassatase
+// (gmb-sarja) on jo kaytossa /compare-tyokalussa. Rakennetaan oma
+// naytto-endpoint samalla mallilla kuin /greenland-smb, jotta myos
+// TAMA nakyy sivun paakortissa, ei vain vertailutyokalussa.
+async function handleGreenlandGMB() {
+  const gmbUrl = 'https://thredds.geus.dk/thredds/fileServer/MassBalance/MB_cumulative.csv';
+  try {
+    const r = await fetch(gmbUrl);
+    if (!r.ok) {
+      throw new Error(`GEUS HTTP ${r.status}`);
+    }
+    const text = await r.text();
+    const lines = text.trim().split('\n').slice(1); // ohita otsikkorivi
+    const rows = [];
+    for (const l of lines) {
+      const parts = l.split(',');
+      const cum = parseFloat(parts[1]);
+      if (!Number.isNaN(cum)) rows.push({ date: parts[0], cumulative: cum });
+    }
+    if (rows.length < 2) throw new Error('Liian vahan kelvollisia riveja GEUS-datassa');
+
+    const last = rows[rows.length - 1];
+    const prev = rows[rows.length - 2];
+    const dailyRate = last.cumulative - prev.cumulative;
+
+    return json({
+      bem_e_tyylinen_komponentti: 'AMOC — Gronlannin kokonaismassatase (GEUS/PROMICE)',
+      lahde: 'GEUS/PROMICE (Mankoff ym. 2021), thredds.geus.dk',
+      huom: 'KOKONAISmassatase (sisaltaa jaatikoiden kalvamisen/discharge, ei vain pinta) - 1986-nykyhetki. Eri suure kuin /greenland-smb (DMI, vain pinta, vain nykyinen sulamiskausi).',
+      pisteita_yhteensa: rows.length,
+      viimeisin: {
+        date: last.date,
+        cumulative_gt: Number(last.cumulative.toFixed(2)),
+        daily_rate_gt: Number(dailyRate.toFixed(3)),
+      },
+    });
+  } catch (e) {
+    return json({ error: e.message, step: 'greenland-gmb', gmb_url: gmbUrl }, 502);
   }
 }
 
@@ -1460,6 +1503,8 @@ export default {
         return await handleRapidInfo();
       } else if (path === '/greenland-smb') {
         return await handleGreenlandSMB();
+      } else if (path === '/greenland-gmb') {
+        return await handleGreenlandGMB();
       } else if (path === '/nao') {
         return await handleNAO(url);
       } else if (path === '/compare/nao-sla') {
