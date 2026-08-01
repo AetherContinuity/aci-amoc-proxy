@@ -838,16 +838,15 @@ async function fetchERDDAPSinglePointInChunks(buildUrl, startStr, endStr) {
 // kuukausi yksittaisena, kevyena ERDDAP-kyselyna (ei aikavalia lainkaan),
 // valimuistilla. Valttaa "pitka aikavali"-502-ongelman kokonaan koska
 // yksikaan yksittainen kysely ei koskaan pyyda enempaa kuin 1 paivan.
-async function fetchERDDAPMonthlySamples(buildUrl, startStr, endStr, monthStep) {
-  const dates = sampleMonthlyDates(startStr, endStr, 15, monthStep);
+async function fetchERDDAPAtDates(buildUrl, dates) {
   const out = new Map();
-  const BATCH_SIZE = 3; // yksittaiset paivat ovat paljon kevyempia kuin aikavalit, voidaan sallia hieman enemman rinnakkaisuutta
+  const BATCH_SIZE = 3;
   for (let i = 0; i < dates.length; i += BATCH_SIZE) {
     const batch = dates.slice(i, i + BATCH_SIZE);
     const responses = await Promise.all(batch.map(d => cachedFetch(buildUrl(d, d))));
     for (let j = 0; j < responses.length; j++) {
       const r = responses[j];
-      if (!r.ok) continue; // yksittaisen kuukauden puuttuminen ei kaadu koko hakua
+      if (!r.ok) continue;
       const csv = await r.text();
       csv.trim().split('\n').slice(2).forEach(l => {
         const [time, , , v] = l.split(',');
@@ -857,6 +856,11 @@ async function fetchERDDAPMonthlySamples(buildUrl, startStr, endStr, monthStep) 
     }
   }
   return out;
+}
+
+async function fetchERDDAPMonthlySamples(buildUrl, startStr, endStr, monthStep) {
+  const dates = sampleMonthlyDates(startStr, endStr, 15, monthStep);
+  return fetchERDDAPAtDates(buildUrl, dates);
 }
 
 // PAIVITETTY 2026-07-31, kayttajan oma paatos ("Vahennetaan"): 'monthly'-
@@ -1123,6 +1127,127 @@ function applyMovingAverage(dateValueMap, windowDays) {
   return out;
 }
 
+// Sarjat jotka eivat tarvitse ERDDAP-hakua (halpoja, koko range voidaan
+// hakea kerralla ja poimia tarvittavat paivat jalkikateen)
+const CHEAP_SERIES = new Set(['nao', 'smb', 'gmb', 'rapid_moc', 'rapid_umo', 'rapid_gs', 'rapid_ek']);
+
+function shiftDate(dateStr, deltaDays) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  return new Date(d.getTime() + deltaDays * 86400000).toISOString().slice(0, 10);
+}
+
+// Hakee YHDEN sarjan arvot TASMALLEEN annetuille paivamaarille (ei
+// jatkuvalle valille). "Halvat" sarjat: hae koko kattava range kerran,
+// poimi sitten pyydetyt paivat. "Kalliit" (ERDDAP) sarjat: hae jokainen
+// pyydetty paiva erikseen omana yksittaispisteen kyselynaan.
+async function fetchSeriesAtExactDates(seriesName, dates, params) {
+  if (CHEAP_SERIES.has(seriesName)) {
+    const minD = dates.reduce((a,b) => a < b ? a : b);
+    const maxD = dates.reduce((a,b) => a > b ? a : b);
+    const fullMap = await SERIES_PROVIDERS[seriesName](minD, maxD, params);
+    const out = new Map();
+    dates.forEach(d => { if (fullMap.has(d)) out.set(d, fullMap.get(d)); });
+    return out;
+  }
+  if (seriesName === 'sst') {
+    const lat = params.get('sstLat') || '60';
+    const lon = params.get('sstLon') || '-30';
+    return fetchERDDAPAtDates(
+      (s) => `https://coastwatch.noaa.gov/erddap/griddap/noaacrwsstanomalyDaily.csv?sea_surface_temperature_anomaly[(${s}T00:00:00Z):(${s}T00:00:00Z)][(${lat})][(${lon})]`,
+      dates);
+  }
+  if (seriesName === 'sla') {
+    const lat = params.get('lat') || '26.5';
+    const lonWest = params.get('lonWest') || '-75';
+    const lonEast = params.get('lonEast') || '-15';
+    const [westMap, eastMap] = await Promise.all([
+      fetchERDDAPAtDates((s) => `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${s}T00:00:00Z):(${s}T00:00:00Z)][(${lat})][(${lonWest})]`, dates),
+      fetchERDDAPAtDates((s) => `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${s}T00:00:00Z):(${s}T00:00:00Z)][(${lat})][(${lonEast})]`, dates),
+    ]);
+    const out = new Map();
+    eastMap.forEach((v, d) => { if (westMap.has(d)) out.set(d, v - westMap.get(d)); });
+    return out;
+  }
+  throw new Error(`fixedLag-tila ei tue sarjaa: ${seriesName}`);
+}
+
+// LISATTY 2026-07-31: testaa YHTA tiettya, ennalta tunnettua paivatason
+// viivetta (esim. -11 vrk) koko pitkalla aikavalilla harvalla, halvalla
+// naytteenotolla. Ratkaisee sen dimensionaalisen ongelman joka syntyi
+// kun kuukausittaista naytteenottoa yritettiin kayttaa 61 viiveen
+// indeksipohjaisen skannauksen kanssa (viive 1 tarkoitti kuukausia,
+// ei paivaa). Tassa siirto tehdaan KALENTERIPAIVINA hakuvaiheessa, ei
+// jalkikateen indeksipaikkoina.
+async function handleCompareFixedLag(url, seriesA, seriesB, endDate, days, fixedLag) {
+  const monthStep = parseInt(url.searchParams.get('monthly') || '6', 10);
+  const end = new Date(endDate + 'T00:00:00Z');
+  const start = new Date(end.getTime() - days * 24 * 3600 * 1000);
+  const startStr = start.toISOString().slice(0, 10);
+
+  try {
+    const anchorDates = sampleMonthlyDates(startStr, endDate, 15, monthStep);
+    // series_b haetaan ankkuripaivina sellaisenaan; series_a haetaan
+    // ankkuri+fixedLag -siirrettyina paivina (lag>0 = B edeltaa A:ta,
+    // sama etumerkkikonventio kuin paaskannauksessa)
+    const datesB = anchorDates;
+    const datesA = anchorDates.map(d => shiftDate(d, fixedLag));
+
+    const [mapA, mapB] = await Promise.all([
+      fetchSeriesAtExactDates(seriesA, datesA, url.searchParams),
+      fetchSeriesAtExactDates(seriesB, datesB, url.searchParams),
+    ]);
+
+    const xs = [], ys = [], pairedDates = [];
+    for (let i = 0; i < anchorDates.length; i++) {
+      if (mapA.has(datesA[i]) && mapB.has(datesB[i])) {
+        xs.push(mapA.get(datesA[i]));
+        ys.push(mapB.get(datesB[i]));
+        pairedDates.push({ anchor: anchorDates[i], dateA: datesA[i], dateB: datesB[i] });
+      }
+    }
+
+    if (xs.length < 5) {
+      throw new Error(`Liian vahan paallekkaisia pisteita (${xs.length}) - tarkista etta molempien sarjojen data ulottuu pyydetylle valille`);
+    }
+
+    const r = pearsonR(xs, ys);
+    const rho = spearmanRho(xs, ys);
+    const { neff, r1x, r1y, acf_lags_used, acf_sum } = effectiveN(xs, ys);
+    const pVal = pValueFromR(r, neff);
+
+    return json({
+      bem_e_tyylinen_komponentti: `AMOC — kiintean viiveen pitkan aikavalin testi: ${seriesA} vs ${seriesB}`,
+      lahde: 'ACI yleinen kahden aikasarjan vertailumoottori (fixedLag-tila)',
+      kysely: { series_a: seriesA, series_b: seriesB, date: endDate, days, fixedLag, monthStep },
+      huom_menetelmasta: 'Tama tila testaa YHTA ennalta valittua paivatason viivetta harvalla (kuukausittaisella) naytteenotolla koko pitkan aikavalin yli - EI 61 viiveen skannausta. Sarjan A hakupaivamaaria siirretaan KALENTERIPAIVINA (fixedLag vrk) ennen hakua, ei indeksipaikkoina jalkikateen - talla valtetaan dimensionaalinen virhe joka syntyisi jos harvaa naytetta yritettaisiin skannata paivatason viiveilla.',
+      series: {
+        anchor_points: anchorDates.length,
+        matched_points: xs.length,
+        date_range: [anchorDates[0], anchorDates[anchorDates.length - 1]],
+      },
+      statistics: {
+        pearson_r: Number(r.toFixed(4)),
+        spearman_rho: Number(rho.toFixed(4)),
+        r_squared: Number((r*r).toFixed(4)),
+        effective_n: Number(neff.toFixed(1)),
+        raw_n: xs.length,
+        lag1_autocorr_a: r1x,
+        lag1_autocorr_b: r1y,
+        p_value: pVal,
+        fixed_lag_days: fixedLag,
+      },
+      naytepisteet: pairedDates.slice(0, 5).concat(pairedDates.length > 10 ? ['...'] : []).concat(pairedDates.slice(-3)),
+      notes: [
+        `Testattu KIINTEA viive ${fixedLag} vrk, ei skannausta - jos haluat skannata eri viiveita, aja tama useita kertoja eri fixedLag-arvoilla (esim. -11, -10, -12) ja vertaa r-arvoja kasin.`,
+        `p-arvo laskettu Neff:lla (${neff.toFixed(1)}), ei raa'alla N:lla (${xs.length})`,
+        `Ankkuripisteita ${anchorDates.length} (monthStep=${monthStep}), tama pitaa alipyyntomaaran alle Cloudflaren 50:n rajan`,
+      ],
+    });
+  } catch (e) {
+    return json({ error: e.message, step: 'compare-fixed-lag', series_a: seriesA, series_b: seriesB }, 502);
+  }
+}
+
 async function handleCompare(url) {
   const seriesA = url.searchParams.get('series_a');
   const seriesB = url.searchParams.get('series_b');
@@ -1130,12 +1255,24 @@ async function handleCompare(url) {
   const maxLag = parseInt(url.searchParams.get('lag') || url.searchParams.get('maxLag') || '30', 10);
   const smooth = parseInt(url.searchParams.get('smooth') || '0', 10); // LISATTY: liukuva keskiarvo (vrk), 0=ei suodatusta
   const endDate = url.searchParams.get('date') || new Date(Date.now() - 3*24*3600*1000).toISOString().slice(0, 10);
+  // LISATTY 2026-07-31, kayttajan oma jatkokehitys: kun kuukausittainen
+  // naytteenotto paljasti etta indeksipohjainen lag-skannaus ei tee
+  // dimensionaalisesti mitaan jarkea harvalla otannalla (viive 1 =
+  // 24kk, ei 1 paiva) - LISATTY erillinen, kiinteän viiveen testitila.
+  // Testaa YHTA tiettya, jo tunnettua paivatason viivetta (esim. -11)
+  // KOKO pitkalla aikavalilla harvalla naytteenotolla, siirtamalla
+  // toisen sarjan hakupaivamaaria KALENTERIPAIVINA, ei indeksipaikkoina.
+  const fixedLag = url.searchParams.get('fixedLag') !== null ? parseInt(url.searchParams.get('fixedLag'), 10) : null;
 
   if (!seriesA || !seriesB) {
     return json({ error: 'series_a ja series_b ovat pakollisia parametreja', saatavilla: Object.keys(SERIES_PROVIDERS) }, 400);
   }
   if (!SERIES_PROVIDERS[seriesA] || !SERIES_PROVIDERS[seriesB]) {
     return json({ error: `Tuntematon sarja: ${!SERIES_PROVIDERS[seriesA] ? seriesA : seriesB}`, saatavilla: Object.keys(SERIES_PROVIDERS) }, 400);
+  }
+
+  if (fixedLag !== null) {
+    return handleCompareFixedLag(url, seriesA, seriesB, endDate, days, fixedLag);
   }
 
   const end = new Date(endDate + 'T00:00:00Z');
