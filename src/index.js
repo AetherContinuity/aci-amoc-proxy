@@ -26,7 +26,7 @@ function json(obj, status = 200) {
 async function handleStatus() {
   return json({
     proxy: 'aci-amoc-proxy',
-    version: '0.1',
+    version: '0.2',
     purpose: 'AMOC Endurance/Continuity -instrumentin datalahteet',
     reference_doc: 'https://aethercontinuity.org/tools/amoc-instrument-plan.md',
     routes: {
@@ -35,19 +35,19 @@ async function handleStatus() {
       '/sla-gradient': 'Ita-lansi-korkeusero 26.5N (kokeellinen approksimaatio RAPID:n menetelmasta) - ?lat=...&lonWest=...&lonEast=...&date=YYYY-MM-DD',
       '/sla-gradient-mean': '30 vrk (oletus) liukuva keskiarvo ita-lansi-korkeuserosta, tasoittaa mesoskaalakohinaa - ?lat=...&lonWest=...&lonEast=...&endDate=YYYY-MM-DD&days=N',
       '/sla-gradient-anomaly': 'Kausikorjattu anomalia (gradientti miinus kuukauden klimatologia, 2v data) - ?lat=...&lonWest=...&lonEast=...&date=YYYY-MM-DD',
-      '/sst-anomaly': 'Meriveden lampotila-anomalia - NOAA ERDDAP (OISST) · ?lat=...&lon=...&date=YYYY-MM-DD · LUOTETTAVA',
+      '/sst-anomaly': 'Meriveden lampotila-anomalia - NOAA ERDDAP, Coral Reef Watch (noaacrwsstanomalyDaily; EI OISST, toisin kuin aiempi kuvaus vaitti) · ?lat=...&lon=...&date=YYYY-MM-DD · LUOTETTAVA',
       '/rapid-info': 'RAPID-AMOC-projektin README (viite/metatiedot, ei viela itse data-arvoja) · EI PARAMETREJA',
       '/greenland-smb': 'Gronlannin pintamassatase - DMI Polar Portal · EI PARAMETREJA (palauttaa koko sarjan) · LUOTETTAVA',
-      '/greenland-gmb': 'Gronlannin KOKONAISmassatase (sisaltaa kalvamisen) - GEUS/PROMICE 1986-nykyhetki · EI PARAMETREJA (palauttaa vain tuoreimman arvon) · LUOTETTAVA',
+      '/greenland-gmb': 'Gronlannin KOKONAISmassatase (sisaltaa kalvamisen) - GEUS/PROMICE 1986-nykyhetki · EI PARAMETREJA (palauttaa tuoreimman HAVAINTOrivin; lahteen ennusterivit ohitetaan)',
+      '/series': 'Yhden sarjan raaka-arvot aikavalilta, ilman tilastoja - ?name=X&start=YYYY-MM-DD&end=YYYY-MM-DD[&chunk=N] · sst/sla: enintaan 20 ERDDAP-palaa per kutsu (oletuspala 90 vrk), epaonnistuneet palat raportoidaan · tarkoitettu pitkien analyysien ajamiseen Workerin ulkopuolella',
       '/nao': 'Pohjois-Atlantin oskillaatio - NOAA PSL · ?date=YYYY-MM-DD (yksi arvo) tai ?date=...&days=N (aikasarja) · LUOTETTAVA, mutta hidas suurilla days-arvoilla (koko 1948-tiedosto haetaan joka kerta)',
       '/compare/nao-sla': '(VANHENTUNUT, sailytetty taaksepain-yhteensopivuuden vuoksi - kayta /compare?series_a=sla&series_b=nao)',
-      '/compare': 'YLEINEN kahden aikasarjan vertailumoottori - ?series_a=X&series_b=Y&date=YYYY-MM-DD&days=N&lag=N&smooth=N&monthly=N (vain sla/sst: kuukausittainen naytteenotto N kk:n valein, esim. monthly=6 puolivuosittain - valttaa ERDDAP:n pitka-aikavali-502-ongelman JA Cloudflaren 50 alipyynnon rajan; oletukset SST=6kk/~40 alipyyntoa, SLA=12kk/~40 alipyyntoa kahdelle pisteelle; kaikki ERDDAP-kutsut valimuistissa Cache API:lla) · saatavilla: sla, nao, sst, smb (vain nyk. sulamiskausi), gmb (GEUS kokonaismassatase 1986-), rapid_moc, rapid_umo, rapid_gs, rapid_ek (RAPID vain 2004-04-07...2024-03-22, ei live) · palauttaa Pearson r, Spearman rho, effective N (autokorrelaatiokorjattu), lag-spektri, automaattinen tulkinta',
+      '/compare': 'YLEINEN kahden aikasarjan vertailumoottori - ?series_a=X&series_b=Y&date=YYYY-MM-DD&days=N&lag=N&smooth=N&monthly=N (vain sla/sst: kuukausittainen naytteenotto N kk:n valein, esim. monthly=6 puolivuosittain - valttaa ERDDAP:n pitka-aikavali-502-ongelman JA Cloudflaren 50 alipyynnon rajan; oletukset SST=6kk/~40 alipyyntoa, SLA=12kk/~40 alipyyntoa kahdelle pisteelle; kaikki ERDDAP-kutsut valimuistissa Cache API:lla) · saatavilla: sla, nao, sst, smb (vain nyk. sulamiskausi), gmb (GEUS kokonaismassatase 1986-), rapid_moc, rapid_umo, rapid_gs, rapid_ek (RAPID vain 2004-04-07...2024-03-22, ei live) · palauttaa Pearson r, Spearman rho, effective N (autokorrelaatiokorjattu), lag-spektri, automaattinen tulkinta · p-arvot t-jakaumasta (df=Neff-2) 5.10.2026 alkaen, sita ennen normaaliapproksimaatiosta (liian pienia pienella Neff:lla)',
     },
     ei_viela_toteutettu: {
-      rapid_data: 'Itse moc_transports-datatiedoston tarkka URL/formaatti ei viela varmistettu',
       greenland_grace: 'PODAAC:n GRACE-kokonaismassatase vaatii aidon NASA Earthdata-kirjautumisen (vahvistettu, ei kierrettavissa). /greenland-smb tarjoaa avoimen VAIHTOEHDON (pintamassatase, ei sama suure).',
     },
-    caveat: 'Kaikki reitit LUOTETTAVA-merkinnalla on vahvistettu web_fetch-testeilla 2026-07-30, mutta EI VIELA taman proxyn omalla live-testilla (Cloudflare-ymparistosta). Tarkista aina ensimmaisella kayttokerralla.',
+    caveat: 'LUOTETTAVA-merkinta tarkoittaa etta reitti on toiminut live-kaytossa; se ei ota kantaa siihen, onko sarja validoitu AMOC-proksiksi. Tila 5.10.2026: /compare:n paivatason ERDDAP-haku (350 vrk:n palat) palauttaa 502 - kayta /series-reittia pienemmilla paloilla.',
   });
 }
 
@@ -388,13 +388,22 @@ async function handleGreenlandSMB() {
       };
     });
     const latest = parsed[parsed.length - 1] || null;
+    // LISATTY 2026-10-05 (diagnostiikka): 5.10.2026 sarja paattyi 8.9.
+    // eika ollut selvaa, onko lahde pysahtynyt vai pudottaako jasennin
+    // riveja. Raportoidaan numerolla alkavat rivit jotka EIVAT lapaisseet
+    // jasenninta, seka viimeisimman pisteen ika.
+    const rejected = lines.map(l => l.trim()).filter(l => /^\d{6,8}\b/.test(l) && !dataLines.includes(l));
+    const ageDays = latest ? Math.floor((Date.now() - new Date(latest.date + 'T00:00:00Z').getTime()) / 86400000) : null;
 
     return json({
       bem_e_tyylinen_komponentti: 'AMOC — Gronlannin makean veden indikaattori (pintamassatase)',
       lahde: 'DMI Polar Portal (download.dmi.dk), HARMONIE-AROME IGB -malli',
-      huom: 'PINTAmassatase (sadanta - sulaminen), EI GRACE:n kokonaismassatase (ei sisalla jaatikoiden kalvamista). PODAAC:n GRACE-data vaatisi aidon NASA Earthdata -kirjautumisen (vahvistettu, ei kierrettavissa) - tama on paras avoin vaihtoehto.',
+      huom: 'PINTAmassatase (sadanta - sulaminen), EI GRACE:n kokonaismassatase (ei sisalla jaatikoiden kalvamista). Sarja alkaa massatasevuoden alusta 1.9. ja kumulatiivinen arvo nollautuu silloin. PODAAC:n GRACE-data vaatisi aidon NASA Earthdata -kirjautumisen (vahvistettu, ei kierrettavissa) - tama on paras avoin vaihtoehto.',
       pisteita_jasennetty: parsed.length,
       viimeisin: latest,
+      viimeisin_ika_vrk: ageDays,
+      hylattyja_datarivin_nakoisia: rejected.length,
+      hylatyt_nayte: rejected.slice(-5),
       koko_sarja: parsed,
     });
   } catch (e) {
@@ -422,17 +431,27 @@ async function handleGreenlandGMB() {
       const cum = parseFloat(parts[1]);
       if (!Number.isNaN(cum)) rows.push({ date: parts[0], cumulative: cum });
     }
-    if (rows.length < 2) throw new Error('Liian vahan kelvollisia riveja GEUS-datassa');
+    // KORJATTU 2026-10-05: GEUS:n tuote (Mankoff ym. 2021, "Greenland ice
+    // sheet mass balance from 1840 through next week") sisaltaa noin
+    // viikon ENNUSTEEN - tiedoston viimeiset rivit ovat tulevaisuudessa.
+    // Tama oli 20.8.2026 havaitun "paivays 5 vrk tulevaisuudessa" -ilmion
+    // juurisyy: ei pipeline-bugi, vaan tuotteen ominaisuus. Naytetaan
+    // viimeisin rivi jonka paivays on enintaan tanaan (UTC).
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const observed = rows.filter(r => r.date <= todayStr);
+    const forecastRows = rows.length - observed.length;
+    if (observed.length < 2) throw new Error('Liian vahan kelvollisia riveja GEUS-datassa');
 
-    const last = rows[rows.length - 1];
-    const prev = rows[rows.length - 2];
+    const last = observed[observed.length - 1];
+    const prev = observed[observed.length - 2];
     const dailyRate = last.cumulative - prev.cumulative;
 
     return json({
       bem_e_tyylinen_komponentti: 'AMOC — Gronlannin kokonaismassatase (GEUS/PROMICE)',
       lahde: 'GEUS/PROMICE (Mankoff ym. 2021), thredds.geus.dk',
-      huom: 'KOKONAISmassatase (sisaltaa jaatikoiden kalvamisen/discharge, ei vain pinta) - 1986-nykyhetki. Eri suure kuin /greenland-smb (DMI, vain pinta, vain nykyinen sulamiskausi).',
-      pisteita_yhteensa: rows.length,
+      huom: 'KOKONAISmassatase (sisaltaa jaatikoiden kalvamisen/discharge, ei vain pinta) - 1986-nykyhetki. Lahdetiedoston lopussa olevat ennusterivit (paivays tulevaisuudessa) on ohitettu. Viimeisimmat havaintopaivat ovat lahteen mukaan alustavia. Eri suure kuin /greenland-smb (DMI, vain pinta, massatasevuosi alkaa 1.9.).',
+      pisteita_yhteensa: observed.length,
+      ennusteriveja_ohitettu: forecastRows,
       viimeisin: {
         date: last.date,
         cumulative_gt: Number(last.cumulative.toFixed(2)),
@@ -550,11 +569,63 @@ function normalCDF(z) {
   if (z > 0) p = 1 - p;
   return p;
 }
+// KORJATTU 2026-10-05: p-arvo lasketaan Studentin t-jakaumasta
+// (df = n-2), ei normaalijakaumasta. Aiempi versio kaytti normalCDF:aa,
+// jonka oma kommentti ylla rajaa sen tapauksiin n>100 - mutta funktiota
+// kutsutaan EFFECTIVE N:lla, joka on tassa instrumentissa tyypillisesti
+// 7-40. Silla alueella normaaliapproksimaatio antaa 2-3 kertaa liian
+// pienia p-arvoja (esim. r=0.525, n=32.3: normaali 0.0007, t 0.0019;
+// r=0.921, n=6.6: normaali ~0, t 0.005). df saa olla ei-kokonaisluku
+// (Neff), koska t-jakauma lasketaan epataydellisen beetafunktion kautta.
+function logGamma(x) {
+  const c = [76.18009172947146, -86.50532032941677, 24.01409824083091,
+    -1.231739572450155, 0.1208650973866179e-2, -0.5395239384953e-5];
+  let y = x, tmp = x + 5.5;
+  tmp -= (x + 0.5) * Math.log(tmp);
+  let ser = 1.000000000190015;
+  for (let j = 0; j < 6; j++) ser += c[j] / ++y;
+  return -tmp + Math.log(2.5066282746310005 * ser / x);
+}
+function betaCF(a, b, x) {
+  const MAXIT = 300, EPS = 3e-12, FPMIN = 1e-300;
+  const qab = a + b, qap = a + 1, qam = a - 1;
+  let c = 1, d = 1 - qab * x / qap;
+  if (Math.abs(d) < FPMIN) d = FPMIN;
+  d = 1 / d;
+  let h = d;
+  for (let m = 1; m <= MAXIT; m++) {
+    const m2 = 2 * m;
+    let aa = m * (b - m) * x / ((qam + m2) * (a + m2));
+    d = 1 + aa * d; if (Math.abs(d) < FPMIN) d = FPMIN;
+    c = 1 + aa / c; if (Math.abs(c) < FPMIN) c = FPMIN;
+    d = 1 / d; h *= d * c;
+    aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+    d = 1 + aa * d; if (Math.abs(d) < FPMIN) d = FPMIN;
+    c = 1 + aa / c; if (Math.abs(c) < FPMIN) c = FPMIN;
+    d = 1 / d;
+    const del = d * c; h *= del;
+    if (Math.abs(del - 1) < EPS) break;
+  }
+  return h;
+}
+function regIncBeta(a, b, x) {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  const bt = Math.exp(logGamma(a + b) - logGamma(a) - logGamma(b) + a * Math.log(x) + b * Math.log(1 - x));
+  return x < (a + 1) / (a + b + 2)
+    ? bt * betaCF(a, b, x) / a
+    : 1 - bt * betaCF(b, a, 1 - x) / b;
+}
+// Kaksisuuntainen p-arvo t-jakaumasta: P(|T| > |t|) = I_{df/(df+t^2)}(df/2, 1/2)
+function tTwoSidedP(t, df) {
+  if (!(df > 0)) return null;
+  return Math.min(1, regIncBeta(df / 2, 0.5, df / (df + t * t)));
+}
 function pValueFromR(r, n) {
   if (n < 3 || Math.abs(r) >= 1) return null;
-  const t = r * Math.sqrt((n-2)/(1-r*r));
-  const oneSided = 1 - normalCDF(Math.abs(t));
-  return Math.min(1, oneSided * 2);
+  const df = n - 2;
+  const t = r * Math.sqrt(df / (1 - r * r));
+  return tTwoSidedP(t, df);
 }
 
 // Benjamini-Hochberg FDR-korjaus (1995) monivertailulle.
@@ -1019,7 +1090,9 @@ async function fetchGMBSeries(startStr, endStr) {
     if (!Number.isNaN(cum)) rows.push({ date, cumulative: cum });
   }
   const out = new Map();
+  const todayStr = new Date().toISOString().slice(0, 10); // ennusterivit pois, ks. handleGreenlandGMB
   for (let i = 1; i < rows.length; i++) {
+    if (rows[i].date > todayStr) break;
     if (rows[i].date >= startStr && rows[i].date <= endStr) {
       out.set(rows[i].date, rows[i].cumulative - rows[i-1].cumulative);
     }
@@ -1477,6 +1550,100 @@ async function handleCompare(url) {
   }
 }
 
+
+// ── /series — yhden sarjan raaka-arvot aikavalilta ──
+// LISATTY 2026-10-05. Syy: /compare tekee haun JA tilastot samassa
+// Worker-kutsussa, jolloin Cloudflaren ilmaisen tason 50 alipyynnon
+// raja estaa pitkat paivatason analyysit (20 v x ERDDAP-palat). Tama
+// reitti palauttaa vain datan - analyysi (kausisyklin poisto, kuukausi-
+// keskiarvot, surrogaattitestit) voidaan ajaa Workerin ulkopuolella ja
+// pitka aikavali hakea usealla perakkaisella kutsulla.
+//
+// ?name=sst&start=YYYY-MM-DD&end=YYYY-MM-DD[&chunk=N][&sstLat=..&sstLon=..]
+// ERDDAP-sarjoille (sst, sla): enintaan MAX_ERDDAP_CHUNKS palaa per
+// kutsu, palan pituus chunk vrk (oletus 90 - /compare:n 350 vrk:n pala
+// on tuottanut ERDDAP:lta 502-vastauksia). Ei Cache API:a (ks.
+// amoc-instrument-plan.md, 1.8.2026: kaare aiheutti alipyyntorajan
+// ylityksen). Jos pala epaonnistuu, se raportoidaan eika koko kutsu kaadu.
+const MAX_ERDDAP_CHUNKS = 20;
+async function fetchERDDAPRangeReport(buildUrl, startStr, endStr, chunkDays) {
+  const chunks = splitDateRangeIntoChunks(startStr, endStr, chunkDays);
+  const out = new Map();
+  const failed = [];
+  for (const c of chunks) {
+    try {
+      const r = await fetch(buildUrl(c.start, c.end));
+      if (!r.ok) { failed.push({ start: c.start, end: c.end, status: r.status }); continue; }
+      const csv = await r.text();
+      csv.trim().split('\n').slice(2).forEach(l => {
+        const [time, , , v] = l.split(',');
+        const val = parseFloat(v);
+        if (!Number.isNaN(val)) out.set(time.slice(0, 10), val);
+      });
+    } catch (e) {
+      failed.push({ start: c.start, end: c.end, status: String(e.message) });
+    }
+  }
+  return { map: out, failed, chunks: chunks.length };
+}
+async function handleSeries(url) {
+  const name = url.searchParams.get('name');
+  const start = url.searchParams.get('start');
+  const end = url.searchParams.get('end');
+  const chunkDays = Math.max(1, Math.min(366, parseInt(url.searchParams.get('chunk') || '90', 10)));
+  const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+  if (!name || !SERIES_PROVIDERS[name]) {
+    return json({ error: 'name puuttuu tai tuntematon', saatavilla: Object.keys(SERIES_PROVIDERS) }, 400);
+  }
+  if (!dateRe.test(start || '') || !dateRe.test(end || '') || start > end) {
+    return json({ error: 'start ja end vaaditaan muodossa YYYY-MM-DD, start <= end' }, 400);
+  }
+  try {
+    let map, failed = [], chunks = null;
+    if (name === 'sst' || name === 'sla') {
+      const nChunks = splitDateRangeIntoChunks(start, end, chunkDays).length;
+      const perChunk = name === 'sla' ? 2 : 1;
+      if (nChunks * perChunk > MAX_ERDDAP_CHUNKS) {
+        return json({ error: `Aikavali vaatisi ${nChunks * perChunk} ERDDAP-kutsua (raja ${MAX_ERDDAP_CHUNKS}) - lyhenna valia tai kasvata chunk-parametria`, chunk: chunkDays }, 400);
+      }
+      if (name === 'sst') {
+        const lat = url.searchParams.get('sstLat') || '60';
+        const lon = url.searchParams.get('sstLon') || '-30';
+        const res = await fetchERDDAPRangeReport(
+          (s, e) => `https://coastwatch.noaa.gov/erddap/griddap/noaacrwsstanomalyDaily.csv?sea_surface_temperature_anomaly[(${s}T00:00:00Z):(${e}T00:00:00Z)][(${lat})][(${lon})]`,
+          start, end, chunkDays);
+        map = res.map; failed = res.failed; chunks = res.chunks;
+      } else {
+        const lat = url.searchParams.get('lat') || '26.5';
+        const lonWest = url.searchParams.get('lonWest') || '-75';
+        const lonEast = url.searchParams.get('lonEast') || '-15';
+        const mk = (lon) => (s, e) => `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${s}T00:00:00Z):(${e}T00:00:00Z)][(${lat})][(${lon})]`;
+        const w = await fetchERDDAPRangeReport(mk(lonWest), start, end, chunkDays);
+        const ea = await fetchERDDAPRangeReport(mk(lonEast), start, end, chunkDays);
+        map = new Map();
+        ea.map.forEach((v, d) => { if (w.map.has(d)) map.set(d, v - w.map.get(d)); });
+        failed = w.failed.concat(ea.failed); chunks = w.chunks + ea.chunks;
+      }
+    } else {
+      map = await SERIES_PROVIDERS[name](start, end, url.searchParams);
+    }
+    const dates = [...map.keys()].sort();
+    return json({
+      sarja: name,
+      metadata: SERIES_METADATA[name] || {},
+      kysely: { start, end, chunk: (name === 'sst' || name === 'sla') ? chunkDays : null },
+      pisteita: dates.length,
+      ensimmainen: dates[0] || null,
+      viimeinen: dates[dates.length - 1] || null,
+      erddap_paloja: chunks,
+      epaonnistuneet_palat: failed,
+      data: dates.map(d => [d, map.get(d)]),
+    });
+  } catch (e) {
+    return json({ error: e.message, step: 'series', name }, 502);
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -1511,6 +1678,8 @@ export default {
         return await handleCompareNAOSLA(url);
       } else if (path === '/compare') {
         return await handleCompare(url);
+      } else if (path === '/series') {
+        return await handleSeries(url);
       }
       return json({ error: `Unknown route: ${path}` }, 404);
     } catch (e) {
