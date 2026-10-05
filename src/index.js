@@ -39,15 +39,15 @@ async function handleStatus() {
       '/rapid-info': 'RAPID-AMOC-projektin README (viite/metatiedot, ei viela itse data-arvoja) · EI PARAMETREJA',
       '/greenland-smb': 'Gronlannin pintamassatase - DMI Polar Portal · EI PARAMETREJA (palauttaa koko sarjan) · LUOTETTAVA',
       '/greenland-gmb': 'Gronlannin KOKONAISmassatase (sisaltaa kalvamisen) - GEUS/PROMICE 1986-nykyhetki · EI PARAMETREJA (palauttaa tuoreimman HAVAINTOrivin; lahteen ennusterivit ohitetaan)',
-      '/series': 'Yhden sarjan raaka-arvot aikavalilta, ilman tilastoja - ?name=X&start=YYYY-MM-DD&end=YYYY-MM-DD[&chunk=N] · sst/sla: enintaan 20 ERDDAP-palaa per kutsu (oletuspala 90 vrk), epaonnistuneet palat raportoidaan · tarkoitettu pitkien analyysien ajamiseen Workerin ulkopuolella',
+      '/series': 'Yhden sarjan raaka-arvot aikavalilta, ilman tilastoja - ?name=X&start=YYYY-MM-DD&end=YYYY-MM-DD[&chunk=N] · sst/sla: enintaan 20 ERDDAP-palaa per kutsu (oletuspala 30 vrk; 90 vrk:n pala palautti 502 5.10.2026), epaonnistuneet palat raportoidaan · tarkoitettu pitkien analyysien ajamiseen Workerin ulkopuolella',
       '/nao': 'Pohjois-Atlantin oskillaatio - NOAA PSL · ?date=YYYY-MM-DD (yksi arvo) tai ?date=...&days=N (aikasarja) · LUOTETTAVA, mutta hidas suurilla days-arvoilla (koko 1948-tiedosto haetaan joka kerta)',
       '/compare/nao-sla': '(VANHENTUNUT, sailytetty taaksepain-yhteensopivuuden vuoksi - kayta /compare?series_a=sla&series_b=nao)',
-      '/compare': 'YLEINEN kahden aikasarjan vertailumoottori - ?series_a=X&series_b=Y&date=YYYY-MM-DD&days=N&lag=N&smooth=N&monthly=N (vain sla/sst: kuukausittainen naytteenotto N kk:n valein, esim. monthly=6 puolivuosittain - valttaa ERDDAP:n pitka-aikavali-502-ongelman JA Cloudflaren 50 alipyynnon rajan; oletukset SST=6kk/~40 alipyyntoa, SLA=12kk/~40 alipyyntoa kahdelle pisteelle; kaikki ERDDAP-kutsut valimuistissa Cache API:lla) · saatavilla: sla, nao, sst, smb (vain nyk. sulamiskausi), gmb (GEUS kokonaismassatase 1986-), rapid_moc, rapid_umo, rapid_gs, rapid_ek (RAPID vain 2004-04-07...2024-03-22, ei live) · palauttaa Pearson r, Spearman rho, effective N (autokorrelaatiokorjattu), lag-spektri, automaattinen tulkinta · p-arvot t-jakaumasta (df=Neff-2) 5.10.2026 alkaen, sita ennen normaaliapproksimaatiosta (liian pienia pienella Neff:lla)',
+      '/compare': 'YLEINEN kahden aikasarjan vertailumoottori - ?series_a=X&series_b=Y&date=YYYY-MM-DD&days=N&lag=N&smooth=N&monthly=N (vain sla/sst: kuukausittainen naytteenotto N kk:n valein, esim. monthly=6 puolivuosittain - valttaa ERDDAP:n pitka-aikavali-502-ongelman JA Cloudflaren 50 alipyynnon rajan; oletukset SST=6kk/~40 alipyyntoa, SLA=12kk/~40 alipyyntoa kahdelle pisteelle; ei valimuistia) · saatavilla: sla, nao, sst, smb (vain nyk. sulamiskausi), gmb (GEUS kokonaismassatase 1986-), rapid_moc, rapid_umo, rapid_gs, rapid_ek (RAPID vain 2004-04-07...2024-03-22, ei live) · palauttaa Pearson r, Spearman rho, effective N (autokorrelaatiokorjattu), lag-spektri, automaattinen tulkinta · p-arvot t-jakaumasta (df=Neff-2) 5.10.2026 alkaen, sita ennen normaaliapproksimaatiosta (liian pienia pienella Neff:lla)',
     },
     ei_viela_toteutettu: {
       greenland_grace: 'PODAAC:n GRACE-kokonaismassatase vaatii aidon NASA Earthdata-kirjautumisen (vahvistettu, ei kierrettavissa). /greenland-smb tarjoaa avoimen VAIHTOEHDON (pintamassatase, ei sama suure).',
     },
-    caveat: 'LUOTETTAVA-merkinta tarkoittaa etta reitti on toiminut live-kaytossa; se ei ota kantaa siihen, onko sarja validoitu AMOC-proksiksi. Tila 5.10.2026: /compare:n paivatason ERDDAP-haku (350 vrk:n palat) palauttaa 502 - kayta /series-reittia pienemmilla paloilla.',
+    caveat: 'LUOTETTAVA-merkinta tarkoittaa etta reitti on toiminut live-kaytossa; se ei ota kantaa siihen, onko sarja validoitu AMOC-proksiksi. Tila 5.10.2026: /compare hakee ERDDAP-sarjat 30 vrk:n paloissa perakkain; yli noin 600 vrk:n ikkunat eivat mahdu alipyyntorajaan - kayta /series-reittia. /compare ei poista kausisyklia: yhden ikkunan tulos on hypoteesi, ei validointi.',
   });
 }
 
@@ -927,23 +927,31 @@ async function cachedFetch(url, ttlSeconds = 2592000) { // 30 vrk oletus
 // LISATTY NYT: cachedFetch jokaiselle palalle - toistuvat kyselyt
 // samalta historialliselta ajalta eivat enaa tarvitse uutta ERDDAP-
 // kutsua.
+// KORJATTU 2026-10-05: palan pituus 350 -> 30 vrk ja Cache API -kaare
+// pois. Mitattu 5.10.2026 /series-reitilla: ERDDAP hylkaa 90 vrk:n palan
+// (502) mutta hyvaksyy 30 vrk:n. Aiempi 350 vrk:n pala toimi elokuussa
+// ilmeisesti vain 30 vrk:n valimuistista ja hajosi sen vanhennuttua.
+// cachedFetch on poistettu taltakin polulta samasta syysta kuin
+// fetchERDDAPAtDates-polulta 1.8.2026 (alipyyntorajan ylitys).
+// Alipyyntobudjetti: oletusikkuna 365 + 2x30 vrk = 425 vrk -> 15 palaa
+// per ERDDAP-piste; sst 15, sla 30 (kaksi pistetta), sla+sst 45 - alle
+// Cloudflaren 50:n rajan. Pidemmat ikkunat: kayta /series-reittia.
+const COMPARE_CHUNK_DAYS = 30;
 async function fetchERDDAPSinglePointInChunks(buildUrl, startStr, endStr) {
-  const chunks = splitDateRangeIntoChunks(startStr, endStr, 350);
+  const chunks = splitDateRangeIntoChunks(startStr, endStr, COMPARE_CHUNK_DAYS);
+  if (chunks.length > 22) {
+    throw new Error(`Aikavali vaatisi ${chunks.length} ERDDAP-palaa per piste (raja 22) - lyhenna days-arvoa, kayta monthly-naytteenottoa tai hae sarja /series-reitilla`);
+  }
   const out = new Map();
-  const BATCH_SIZE = 1;
-  for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
-    const batch = chunks.slice(i, i + BATCH_SIZE);
-    const responses = await Promise.all(batch.map(c => cachedFetch(buildUrl(c.start, c.end))));
-    for (let j = 0; j < responses.length; j++) {
-      const r = responses[j];
-      if (!r.ok) throw new Error(`ERDDAP HTTP ${r.status} (pala ${batch[j].start}...${batch[j].end})`);
-      const csv = await r.text();
-      csv.trim().split('\n').slice(2).forEach(l => {
-        const [time, , , v] = l.split(',');
-        const val = parseFloat(v);
-        if (!Number.isNaN(val)) out.set(time.slice(0, 10), val);
-      });
-    }
+  for (const c of chunks) {
+    const r = await fetch(buildUrl(c.start, c.end));
+    if (!r.ok) throw new Error(`ERDDAP HTTP ${r.status} (pala ${c.start}...${c.end})`);
+    const csv = await r.text();
+    csv.trim().split('\n').slice(2).forEach(l => {
+      const [time, , , v] = l.split(',');
+      const val = parseFloat(v);
+      if (!Number.isNaN(val)) out.set(time.slice(0, 10), val);
+    });
   }
   return out;
 }
@@ -1001,14 +1009,14 @@ async function fetchSLASeries(startStr, endStr, params) {
   const fetcher = monthly
     ? (buildUrl, s, e) => fetchERDDAPMonthlySamples(buildUrl, s, e, monthStep)
     : fetchERDDAPSinglePointInChunks;
-  const [westMap, eastMap] = await Promise.all([
-    fetcher(
-      (s, e) => `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${s}T00:00:00Z):(${e}T00:00:00Z)][(${lat})][(${lonWest})]`,
-      startStr, endStr),
-    fetcher(
-      (s, e) => `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${s}T00:00:00Z):(${e}T00:00:00Z)][(${lat})][(${lonEast})]`,
-      startStr, endStr),
-  ]);
+  // 2026-10-05: pisteet haetaan perakkain (ei Promise.all) - ERDDAP on
+  // kaatunut samanaikaisiin pyyntoihin (ks. suunnitelma 31.7.2026).
+  const westMap = await fetcher(
+    (s, e) => `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${s}T00:00:00Z):(${e}T00:00:00Z)][(${lat})][(${lonWest})]`,
+    startStr, endStr);
+  const eastMap = await fetcher(
+    (s, e) => `https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsshDaily.csv?sla[(${s}T00:00:00Z):(${e}T00:00:00Z)][(${lat})][(${lonEast})]`,
+    startStr, endStr);
   const out = new Map();
   eastMap.forEach((v, d) => { if (westMap.has(d)) out.set(d, v - westMap.get(d)); });
   return out;
@@ -1420,10 +1428,9 @@ async function handleCompare(url) {
   const fetchEndStr = fetchEndDate.toISOString().slice(0, 10) > endDate ? endDate : fetchEndDate.toISOString().slice(0, 10);
 
   try {
-    let [mapA, mapB] = await Promise.all([
-      SERIES_PROVIDERS[seriesA](startStr, fetchEndStr, url.searchParams),
-      SERIES_PROVIDERS[seriesB](startStr, fetchEndStr, url.searchParams),
-    ]);
+    // 2026-10-05: perakkain, ei rinnakkain (ks. fetchSLASeries).
+    let mapA = await SERIES_PROVIDERS[seriesA](startStr, fetchEndStr, url.searchParams);
+    let mapB = await SERIES_PROVIDERS[seriesB](startStr, fetchEndStr, url.searchParams);
 
     if (smooth >= 2) {
       mapA = applyMovingAverage(mapA, smooth);
@@ -1542,6 +1549,7 @@ async function handleCompare(url) {
         `p-arvo laskettu EFFECTIVE N:lla (${neff.toFixed(0)}), ei raa'alla N:lla (${lag0.xs.length}) - molemmat sarjat autokorreloituneita (lag-1: ${r1x}/${r1y}), tavallinen p-arvo olisi liian optimistinen`,
         'Spearman rho tunnistaa monotonisen yhteyden vaikka Pearson (lineaarinen) olisi heikko - vertaa molempia',
         'lag>0 tarkoittaa: series_b edeltaa series_a:ta',
+        'VAROITUS (5.10.2026): kausisyklia EI poisteta. Yhden vuoden ikkunassa kahden sarjan yhteinen vuodenaikaisrakenne voi tuottaa BH-merkitsevan korrelaation, joka ei toistu muina vuosina - nain kavi parille sst/rapid_moc (r=0.525, ei toistunut 18 muuna vuotena, katosi kun kausisykli poistettiin). Yksittaisen ikkunan tulos on hypoteesi; toista se useille vuosille ja anomalioilla ennen johtopaatoksia (scripts/amoc_sst_rapid_analysis.py sivurepositoriossa).',
         `Saatavilla olevat sarjat: ${Object.keys(SERIES_PROVIDERS).join(', ')} - HUOM: rapid_* -sarjat ulottuvat vain 2004-04-07...2024-03-22 (ei live), muut sarjat voivat siis olla paallekkain vain osittain jos endDate on tuo ajanjakso ohi`,
       ],
     });
@@ -1561,8 +1569,8 @@ async function handleCompare(url) {
 //
 // ?name=sst&start=YYYY-MM-DD&end=YYYY-MM-DD[&chunk=N][&sstLat=..&sstLon=..]
 // ERDDAP-sarjoille (sst, sla): enintaan MAX_ERDDAP_CHUNKS palaa per
-// kutsu, palan pituus chunk vrk (oletus 90 - /compare:n 350 vrk:n pala
-// on tuottanut ERDDAP:lta 502-vastauksia). Ei Cache API:a (ks.
+// kutsu, palan pituus chunk vrk (oletus 30; mitattu 5.10.2026: 90 vrk
+// palauttaa 502, 30 vrk menee lapi). Ei Cache API:a (ks.
 // amoc-instrument-plan.md, 1.8.2026: kaare aiheutti alipyyntorajan
 // ylityksen). Jos pala epaonnistuu, se raportoidaan eika koko kutsu kaadu.
 const MAX_ERDDAP_CHUNKS = 20;
@@ -1590,7 +1598,7 @@ async function handleSeries(url) {
   const name = url.searchParams.get('name');
   const start = url.searchParams.get('start');
   const end = url.searchParams.get('end');
-  const chunkDays = Math.max(1, Math.min(366, parseInt(url.searchParams.get('chunk') || '90', 10)));
+  const chunkDays = Math.max(1, Math.min(366, parseInt(url.searchParams.get('chunk') || '30', 10)));
   const dateRe = /^\d{4}-\d{2}-\d{2}$/;
   if (!name || !SERIES_PROVIDERS[name]) {
     return json({ error: 'name puuttuu tai tuntematon', saatavilla: Object.keys(SERIES_PROVIDERS) }, 400);

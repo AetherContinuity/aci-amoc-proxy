@@ -23,7 +23,8 @@ RAPID-sarjat paattyvat 22.3.2024.
 ## Tunnetut rajoitteet
 
 - Cloudflaren ilmaisen tason 50 alipyynnon raja per kutsu. `/series` rajaa ERDDAP-palat 20:een.
-- ERDDAP on palauttanut 502 pitkille aikavaleille (350 vrk:n pala). `/series` kayttaa oletuksena 90 vrk:n paloja ja raportoi epaonnistuneet palat.
+- ERDDAP palauttaa 502 pitkille aikavaleille (mitattu 5.10.2026: 90 vrk hylataan, 30 vrk menee lapi). `/compare` ja `/series` hakevat 30 vrk:n paloissa perakkain; `/series` raportoi epaonnistuneet palat.
+- `/compare` ei poista kausisyklia. Yhden ikkunan tulos on hypoteesi, ei validointi.
 - p-arvot lasketaan t-jakaumasta (df = Neff − 2) 5.10.2026 alkaen. Sita ennen kaytettiin normaaliapproksimaatiota, joka antoi pienella Neff:lla 2–3 kertaa liian pienia p-arvoja.
 
 ## Testit
