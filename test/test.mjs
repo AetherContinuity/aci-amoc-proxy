@@ -93,7 +93,7 @@ const get = async (path) => { const r = await worker.fetch(new Request('https://
   ok('series sst jarjestys', d.ensimmainen === '2020-01-01' && d.viimeinen === '2020-12-31');
 }
 {
-  const [st, d] = await get('/series?name=sst&start=2004-01-01&end=2024-01-01');
+  const [st, d] = await get('/series?name=sst&start=2004-01-01&end=2024-01-01&chunk=90');
   ok('series liian pitka -> 400', st === 400 && /raja/.test(d.error), JSON.stringify(d));
   const [st2] = await get('/series?name=foo&start=2020-01-01&end=2020-02-01');
   ok('series tuntematon -> 400', st2 === 400);
@@ -101,7 +101,17 @@ const get = async (path) => { const r = await worker.fetch(new Request('https://
   ok('series start>end -> 400', st3 === 400);
   calls.length = 0;
   const [st4, d4] = await get('/series?name=sla&start=2020-05-01&end=2020-06-30');
-  ok('series sla ero', st4 === 200 && d4.pisteita === 61 && d4.data.every(x => x[1] === 0) && d4.erddap_paloja === 2, JSON.stringify(d4).slice(0, 300));
+  ok('series sla ero', st4 === 200 && d4.pisteita === 61 && d4.data.every(x => x[1] === 0) && d4.erddap_paloja === 6, JSON.stringify(d4).slice(0, 300));
+}
+// 3b) /compare: 30 vrk:n palat, perakkain, kausisyklivaroitus mukana
+{
+  calls.length = 0;
+  const [st, d] = await get('/compare?series_a=sst&series_b=gmb&date=' + iso(new Date(now - 10 * day)) + '&days=120&lag=10');
+  const n = calls.filter(u => u.includes('erddap')).length;
+  ok('compare sst 30 vrk palat', n === 5, `paloja ${n}, status ${st}, ${JSON.stringify(d).slice(0, 160)}`);
+  ok('compare varoitus', st !== 200 || d.notes.some(x => /kausisyklia EI poisteta/.test(x)));
+  const [st2, d2] = await get('/compare?series_a=sst&series_b=rapid_moc&date=2020-12-31&days=900');
+  ok('compare liian pitka -> virhe', st2 === 502 && /raja 22/.test(d2.error), JSON.stringify(d2).slice(0, 160));
 }
 // 4) BH: klassinen esimerkki sailyy (ei regressiota)
 {
